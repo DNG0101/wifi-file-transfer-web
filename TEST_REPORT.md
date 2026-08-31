@@ -1,4 +1,17 @@
-# Test report — version 3
+# Test report — version 3.1
+
+## Connection-first / direct-save update
+
+- 33 unit/regression tests passed, including the new direct-save policy rejecting OPFS before accepting payload bytes.
+- Two independent Chromium contexts passed the full UI suite: startup discovery visible, diagnostics enabled, QR/scanner available in both modes, sender-generated and receiver-generated invitations, mutual remembered-device approval and rediscovery after reload.
+- File selection stayed hidden until the sender explicitly selected a receiver and its data channel opened. Selection then sent the offer automatically; in the latest local run, the receiver offer was observed 131 ms after the browser file-selection event. This excludes fixture construction and is not a promise of instant completion on other networks.
+- New receiving remained blocked until a destination folder was selected. A 10 MiB + 17 byte binary APK and empty file were saved through the directory-output path, with exact payload bytes, no extra Save/download action, and zero payload records in the IndexedDB blocks store.
+- The test substitutes the native folder picker with a real browser FileSystemDirectoryHandle backed by a dedicated OPFS test folder. It exercises directory writes and metadata recovery, but does not automate the native OS picker or claim the test fixture itself is outside OPFS. Production calls showDirectoryPicker; there is no injected test hook or OPFS fallback in the app UI.
+- Unsupported direct-folder browsers show an explicit receive limitation, retain sending, and are never silently switched to browser-payload storage.
+- Subpath assets/worker, 360 px overflow check, metadata recovery and browser console checks passed.
+- The 10 GiB transfer-engine evidence below is from version 3.0. This update preserves its block size, streaming, verification and recovery engine; it was not rerun as a new 10 GiB native-folder UI benchmark.
+
+## Previous version 3.0 large-file validation
 
 Validation performed on Windows with Node 24 and installed Google Chrome. These are actual results, not a certification of every browser/network.
 

@@ -67,3 +67,6 @@ test('backpressure waits for native bufferedamountlow before sending file bytes'
  const[a,b]=pair(),store=new Store(),Storage=storageClass();const channel=new EventTarget();channel.bufferedAmount=2*1024*1024;a.dataChannel=channel;
  const receiver=new BlockTransfer(b,{store,Storage,onOffer:(_,t)=>t.accept({storage:'test'})});const sender=new BlockTransfer(a,{store,files:[makeFile(10000)]});await until(()=>sender.state==='transferring');await sleep(100);assert.equal(receiver.record.files[0].next,0);assert.equal(receiver.block,null);channel.bufferedAmount=0;channel.dispatchEvent(new Event('bufferedamountlow'));await until(()=>sender.terminal());assert.equal(sender.state,'complete',sender.detail);
 });
+test('direct-save policy rejects browser storage before any payload is accepted',async()=>{
+ const[a,b]=pair(),store=new Store(),Storage=storageClass();const receiver=new BlockTransfer(b,{store,Storage,requireDirectory:true,onOffer:(_,t)=>t.accept({storage:'opfs'})});const sender=new BlockTransfer(a,{store,files:[makeFile(1024)]});await until(()=>sender.terminal());assert.equal(sender.state,'failed');assert.match(sender.detail,/Choose a device folder/);assert.equal(receiver.record,undefined);
+});

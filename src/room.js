@@ -104,6 +104,7 @@ export class Room {
       conn.on('data', m => {
         if (this.closed || this.control !== conn) return;
         if (m?.type === 'members' && Array.isArray(m.members) && m.members.some(x => x?.id === this.id)) {
+          if(Number.isFinite(m.expires))this.expires=m.expires;
           clearTimeout(timeout); this.timers.delete(timeout); joined = true; this.rejectJoin = null;
           this.receiveMembers(m.members); this.setState('connected'); resolve();
         }
@@ -139,7 +140,7 @@ export class Room {
     const members = [...this.members.values()];
     // Only authenticated room members receive the roster, never pending joins.
     for (const [id, c] of this.links) if (c.open && this.members.has(id)) {
-      try { c.send({type:'members',members}); } catch { c.close(); }
+      try { c.send({type:'members',members,expires:this.expires}); } catch { c.close(); }
     }
     this.publishMembers();
   }

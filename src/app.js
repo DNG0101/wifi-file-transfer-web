@@ -1,6 +1,6 @@
 import {Room,newCode,parseRoom,probeNetwork,peerOptions} from './room.js';
 import {BlockTransfer,manifestFor} from './block-transfer.js';
-import {records,BlockStorage,storageAvailability} from './storage.js';
+import {records,BlockStorage} from './storage.js';
 import {TrustedDevices,identity,friendlyName} from './devices.js';
 import {Scanner} from './qr.js';
 import {configureNetwork} from './network.js';
@@ -9,6 +9,8 @@ import qrcode from 'qrcode-generator';
 const $ = id => document.getElementById(id);
 const fmt = n => n<1024?`${n} B`:n<1048576?`${(n/1024).toFixed(1)} KB`:n<1073741824?`${(n/1048576).toFixed(1)} MB`:`${(n/1073741824).toFixed(2)} GB`;
 let room, mode=null, files=[], members=[], active, directory,trust,resumeRecord;
+let selectedMember,preparedConnection,preparingDevice=false,prepareGeneration=0;
+const pendingReceivers=new Map();
 const deviceId=identity();let reconnectTimer,reconnectAttempts=0;
 let connecting=false, attempt=0, lastAttempt, wakeLock, acquiringWake=false;
 const downloads=[], cards=new Map();
@@ -48,26 +50,35 @@ function updateCard(row) {
 function setMode(next) {
   if(busy()) {notice('Finish or cancel this transfer before changing mode.',true);return;}
   mode=next;room?.setMode(mode);trust?.setMode(mode);
+  if(next!=='send')resetPrepared();
+  if(next!=='receive')for(const connection of pendingReceivers.values())connection.close();
   for(const name of ['send','receive']) {$(name).classList.toggle('selected',mode===name);$(name).setAttribute('aria-pressed',mode===name);}
-  $('send-panel').hidden=mode!=='send';$('receive-panel').hidden=mode!=='receive';
-  $('setup-hint').textContent='Scan this invitation on the sending device. You will approve files before they arrive.';
+  $('pairing-panel').hidden=!mode;$('receive-panel').hidden=mode!=='receive';
+  $('setup-hint').textContent='Both devices have a QR and a scanner. Scan either QR, or enter the other device’s code. Connect before selecting files.';
   renderDevices();renderInvite();
 }
 function renderDevices() {
   $('devices').replaceChildren();
   const available=allMembers();
-  if(!available.length) {$('devices').append(el('p','No receiver connected yet. Scan its invitation, enter its code, or open this page on a remembered device.','muted'));}
+  const checking=[...(trust?.rooms.values()||[])].some(entry=>['connecting','reconnecting'].includes(entry.room.state));
+  $('discovery-status').textContent=available.length?`${available.length} connected device${available.length===1?'':'s'} found. Choose a receiver before selecting files.`:checking?'Checking your remembered devices…':'No invited or remembered devices online yet. Scan a QR or enter a connection code.';
+  if(selectedMember&&!busy()&&!available.some(m=>m.deviceId===selectedMember.deviceId&&m.mode==='receive'))resetPrepared();
+  const ready=mode==='send'&&selectedMember&&preparedConnection?.open;
+  $('send-panel').hidden=!ready&&!busy();
+  if(mode!=='send')$('send-panel').hidden=true;
+  $('file-picker').disabled=$('folder-picker').disabled=!ready||!!busy();
+  $('target-name').textContent=selectedMember?`Connected to ${selectedMember.name}. Select files to request transfer immediately.`:'Connect to a receiver first.';
   for(const m of available) {
     const receive=m.mode==='receive'; const b=el('button',undefined,'device');
-    b.append(el('span','▣','device-icon'),el('strong',m.name),el('span',!receive?'Ask this device to choose Receive':files.length?'Send files →':'Ready · select files first','muted'));
-    b.disabled=!receive||!files.length||busy();b.onclick=()=>startSend(m);$('devices').append(b);
+    b.append(el('span','▣','device-icon'),el('strong',m.name),el('span',!receive?'Sender · choose Receive on this device to get files':selectedMember?.deviceId===m.deviceId&&ready?'Connected · choose files below':preparingDevice?'Connecting…':'Connect to this receiver →','muted'));
+    b.disabled=!receive||!!busy()||preparingDevice;b.onclick=()=>prepareReceiver(m);$('devices').append(b);
   }
   $('connected-panel').hidden=!available.length;$('connected-devices').replaceChildren();
   for(const m of available){const row=el('div',undefined,'download');row.append(el('span',m.name+(m.trusted?' · Remembered':'')));if(!m.trusted&&!trust?.contacts.some(c=>c.id===m.deviceId)){const remember=el('button','Remember device','secondary');remember.onclick=async()=>{remember.disabled=true;try{await trust.remember(m);notice('Device remembered. Next time, open this page on both devices.');}catch(e){notice(e.message,true);}finally{remember.disabled=false;}};row.append(remember);}$('connected-devices').append(row);}
 }
 function allMembers(){const combined=[...(trust?.members()||[]),...members.map(m=>({...m,room}))];return combined.filter((m,i)=>combined.findIndex(x=>x.deviceId===m.deviceId)===i);}
 function inviteUrl() {
-  const url=new URL(location.href);url.hash=new URLSearchParams({join:room.code}).toString();return url.href;
+  const url=new URL(location.href);url.hash=new URLSearchParams({join:room.code,mode:mode==='send'?'receive':'send'}).toString();return url.href;
 }
 function renderInvite() {
   if(!room?.id||room.closed)return;
@@ -77,6 +88,7 @@ function renderInvite() {
   $('room-qr').hidden=remaining<=0;
 }
 function roomState(state,detail='') {
+  debug('Connection: '+state);
   $('connection-state').textContent={idle:'Not connected',connecting:'Connecting…',connected:'Connected',reconnecting:'Reconnecting…',disconnected:'Disconnected',closed:'Not connected'}[state]||state;
   $('retry-room').hidden=!['disconnected','reconnecting'].includes(state);
   if(detail)notice(detail,state==='disconnected');renderDevices();
@@ -84,7 +96,7 @@ function roomState(state,detail='') {
 function controls() {
   const locked=!!busy();
   $('create-room').disabled=$('join-room').disabled=connecting||(locked&&active.state!=='reconnecting');
-  $('file-picker').disabled=$('folder-picker').disabled=locked; $('send').disabled=$('receive').disabled=locked;
+  $('send').disabled=$('receive').disabled=locked;
   $('cancel-connection').hidden=!connecting; $('cancel').hidden=!locked;
   $('clear-history').disabled=locked;
   $('pause').hidden=!active||!['transferring','paused'].includes(active.state)||active.localPaused;
@@ -109,11 +121,8 @@ async function maintainWakeLock() {
 function closeRequest() {if($('incoming').open)$('incoming').close();}
 async function refreshAcceptance() {
   if(active?.state!=='offered')return;
-  $('accept').disabled=true;const t=active;
-  try{const capacity=await storageAvailability(t.total);if(active!==t||t.state!=='offered')return;const blocked=!directory&&(!capacity.enough||!capacity.opfs&&t.total>256*1024*1024);
-  $('accept').disabled=blocked;
-  $('request-note').textContent=directory?`Save to ${directory.name}. Allow about ${fmt(t.total*2)} free disk space while verifying; folder free space cannot be measured here.`:blocked?`Not enough supported browser storage for ${fmt(t.total)}. Choose a destination folder, free space, or use desktop Chrome/Edge.`:`Receive into browser storage, then Save to device. Estimated free storage: ${capacity.available===null?'unknown':fmt(capacity.available)}. About ${fmt(t.total*2)} is needed during verification.`;
-  }catch{if(active===t){$('accept').disabled=!directory;$('request-note').textContent='Could not inspect browser storage. Choose a destination folder.';}}
+  $('accept').disabled=!directory;
+  $('request-note').textContent=directory?`Files will save directly to ${directory.name}. Allow about ${fmt(active.total*2)} free disk space during verification. No file contents are stored in browser storage.`:typeof window.showDirectoryPicker==='function'?'Choose a device folder below, then accept. File contents will not be kept in browser storage.':'This browser cannot write directly to a device folder. Receive using desktop Chrome or Edge. You can still send files from this browser.';
 }
 function receivedFile(file) {
   const line=el('div',undefined,'download');
@@ -126,20 +135,20 @@ function receivedFile(file) {
     actions.append(a,remove);line.append(name,actions);
   } else line.append(el('span',`✓ Saved ${file.savedName} to your chosen folder`));
   $('downloads').append(line);$('received-section').hidden=false;
-    $('download-memory').textContent=`${fmt(retainedBytes())} available to save from persistent storage.`;
+    $('download-memory').textContent=file.blob?`${fmt(retainedBytes())} from older browser-stored transfers.`:'Files are already saved in your chosen device folder.';
 }
 function track(conn,member,outgoing,record) {
   active?.conn.close();
   const row={id:record?.transferId||conn.metadata?.transferId||crypto.randomUUID(),peer:member.name,direction:outgoing?'send':'receive',state:'connecting',files:[],bytes:0,total:0,time:new Date().toISOString()};
   history.unshift(row);history=history.slice(0,50);drawHistory();save();
   $('history').closest('details').open=true;
-  const t=new BlockTransfer(conn,{files:outgoing?[...files]:undefined,record,id:record?.transferId||conn.metadata?.transferId,senderId:outgoing?deviceId:member.deviceId,receiverId:outgoing?member.deviceId:deviceId,reselected:!!record,onUpdate:update=>{
-    const changed=row.state!==update.state;Object.assign(row,update);updateCard(row);if(changed){save();debug(`${update.direction} ${update.state}: ${fmt(update.bytes)} verified bytes`);}
+  const t=new BlockTransfer(conn,{files:outgoing?[...files]:undefined,record,id:record?.transferId||conn.metadata?.transferId,senderId:outgoing?deviceId:member.deviceId,receiverId:outgoing?member.deviceId:deviceId,reselected:!!record,requireDirectory:!outgoing,onUpdate:update=>{
+    const changed=row.state!==update.state,advanced=update.bytes>row.bytes;Object.assign(row,update);updateCard(row);if(changed){save();debug(`${update.direction} ${update.state}: ${fmt(update.bytes)} verified bytes`);}else if(advanced)debug(`${update.direction}: ${fmt(update.bytes)} acknowledged and saved`);
     const terminal=['complete','failed','cancelled','declined'].includes(update.state);
     if(terminal) {
       save();closeRequest();
       clearTimeout(reconnectTimer);reconnectAttempts=0;void renderRecovery();
-      notice(update.state==='complete'?(outgoing?'Delivered. The receiver verified all files.':directory?'Received and saved to your chosen folder.':'Received! Click Save to device in Received files below.'):update.detail,update.state!=='complete');
+      notice(update.state==='complete'?(outgoing?'Delivered. The receiver verified and saved all files.':'Received and saved directly to your device folder.'):update.detail,update.state!=='complete');
       if(!outgoing&&update.state==='complete')$('received-section').scrollIntoView({behavior:'smooth',block:'center'});
     } else if(update.state==='transferring')notice(`${outgoing?'Sending':'Receiving'}: ${fmt(update.bytes)} of ${fmt(update.total)}. Keep both pages open.`);
     controls();
@@ -152,30 +161,47 @@ function track(conn,member,outgoing,record) {
 }
 function startSend(member,record) {
   if(busy())return;
-  try {manifestFor(files);const id=record?.transferId||crypto.randomUUID();track(member.room.connect(member.id,id),member,true,record);notice(`Connecting to ${member.name}. They must accept before any file is sent.`);}
+  try {manifestFor(files);const id=record?.transferId||crypto.randomUUID();const connection=!record&&preparedConnection?.open&&selectedMember?.deviceId===member.deviceId?preparedConnection:member.room.connect(member.id,id);track(connection,member,true,record);debug('Files selected; transfer request sent without a separate upload.');notice(`Waiting for ${member.name} to accept. Sending starts immediately after acceptance.`);}
   catch(e) {notice(e.message,true);}
 }
+function resetPrepared(){prepareGeneration++;const conn=preparedConnection;preparedConnection=null;selectedMember=null;preparingDevice=false;if(conn&&conn!==active?.conn)conn.close();}
+function prepareReceiver(member){
+  if(busy())return;if(preparedConnection?.open&&selectedMember?.deviceId===member.deviceId){$('send-panel').scrollIntoView({behavior:'smooth',block:'center'});return;}
+  if(mode!=='send')setMode('send');resetPrepared();const generation=prepareGeneration;preparingDevice=true;renderDevices();
+  try{const conn=member.room.connect(member.id,crypto.randomUUID());preparedConnection=conn;const timer=setTimeout(()=>{if(generation===prepareGeneration&&!conn.open){resetPrepared();notice('Could not connect to this receiver. Try again.',true);renderDevices();}},25000);
+    const opened=()=>{clearTimeout(timer);if(generation!==prepareGeneration){conn.close();return;}selectedMember=member;preparingDevice=false;debug('File channel ready before file selection.');notice(`Connected to ${member.name}. Choose files now; there is no separate upload step.`);renderDevices();};
+    conn.on('open',opened);if(conn.open)opened();conn.on('close',()=>{clearTimeout(timer);if(preparedConnection===conn){preparedConnection=null;preparingDevice=false;renderDevices();}});conn.on('error',()=>{clearTimeout(timer);if(generation===prepareGeneration&&!busy()){resetPrepared();notice('Receiver connection failed. Try connecting again.',true);renderDevices();}});
+  }catch(e){resetPrepared();notice(e.message,true);renderDevices();}
+}
+function awaitTransfer(conn,member){
+  // Establish the channel before opening the picker; consent is still required
+  // when the actual manifest arrives. Never instantiate a transfer for idle peers.
+  const existing=pendingReceivers.get(conn.peer);existing?.close();if(pendingReceivers.size>=4&&!existing){conn.close();return;}pendingReceivers.set(conn.peer,conn);
+  const clean=()=>{clearTimeout(timer);if(pendingReceivers.get(conn.peer)===conn)pendingReceivers.delete(conn.peer);};
+  const timer=setTimeout(()=>{clean();conn.close();},300000);conn.on('close',clean);conn.on('error',clean);
+  conn.once('data',raw=>{clean();let message;try{message=typeof raw==='string'&&raw.length<49152?JSON.parse(raw):null;}catch{}if(message?.type!=='hello'){conn.close();return;}incoming(conn,member);conn.emit('data',raw);});
+}
 function scheduleReconnect(t,member){if(t!==active||t.terminal()||t.direction!=='send')return;clearTimeout(reconnectTimer);if(reconnectAttempts>=4){notice('Automatic retries stopped. Keep both pages open, reconnect if needed, then tap Resume.',true);return;}reconnectTimer=setTimeout(()=>{if(t!==active||t.terminal())return;reconnectAttempts++;const current=allMembers().find(m=>m.deviceId===member.deviceId&&m.mode==='receive');try{if(!current)throw Error('Receiver offline');debug('Reconnection attempt '+reconnectAttempts);t.attach(current.room.connect(current.id,t.id));setTimeout(()=>{if(t===active&&t.state==='connecting'){t.interrupted('Connection retry timed out.');}},25000);}catch{scheduleReconnect(t,member);}},[1000,3000,8000,15000][reconnectAttempts]);}
-function incoming(conn,m){if(busy()){if(active.direction==='receive'&&conn.metadata?.transferId===active.id&&m.deviceId===active.record?.senderId){active.attach(conn);return;}conn.on('open',()=>conn.close());return;}if(conn.metadata?.kind!=='file-v3'){conn.on('open',()=>{conn.send(JSON.stringify({type:'decline',reason:'Please reload both pages to use the current version.'}));setTimeout(()=>conn.close(),300);});return;}track(conn,m,false);}
+function incoming(conn,m){if(busy()){if(active.direction==='receive'&&conn.metadata?.transferId===active.id&&m.deviceId===active.record?.senderId){active.attach(conn);return;}if(conn.open)conn.close();else conn.on('open',()=>conn.close());return;}if(conn.metadata?.kind!=='file-v3'){conn.close();return;}track(conn,m,false);}
 async function openRoom(host,codeOverride,collisions=0) {
   if(busy()&&active.state!=='reconnecting'||connecting)return;
   let code;try{code=host?(codeOverride||newCode()):parseRoom(codeOverride||$('room-code').value);}catch(e){notice(e.message,true);$('room-code').focus();return;}
-  if(!host&&mode!=='send')setMode('send');
+  if(!mode)setMode('send');
   const token=++attempt;
-  room?.close();members=[];connecting=true;lastAttempt={host,code};controls();
+  if(!busy())resetPrepared();room?.close();members=[];connecting=true;lastAttempt={host,code};controls();
   $('room-info').hidden=true;roomState('connecting','Connecting to the other device…');
   const candidate=new Room({
     onMembers:list=>{if(token!==attempt)return;members=list;renderDevices();},
     onError:msg=>{if(token===attempt)notice(msg,true);},
     onState:(state,detail)=>{if(token===attempt)roomState(state,detail);},
-    onTransfer:(conn,m)=>{if(token!==attempt){conn.close();return;}incoming(conn,{...m,room:candidate});},
+    onTransfer:(conn,m)=>{if(token!==attempt){conn.close();return;}awaitTransfer(conn,{...m,room:candidate});},
     onMessage:async(message,m,reply)=>{if(message?.type!=='remember'||busy()){reply({accepted:false});return;}if(!confirm(`Remember ${m.name}? They will be able to find this device when both pages are open. You still approve each file transfer.`)){reply({accepted:false});return;}try{await trust.add(m,message.secret);reply({accepted:true});notice('Device remembered.');}catch(e){reply({accepted:false});notice(e.message,true);}}
   },{deviceId});room=candidate;
   try {
     await networkReady;
     await candidate.open(code,host,$('device-name').value.trim()||'My device',mode);
     if(token!==attempt)return;
-    $('room-code').value=code;$('room-info').hidden=!host;renderInvite();
+    $('room-code').value=code;$('room-info').hidden=false;renderInvite();
     notice(active?.state==='reconnecting'?'Reconnected. Tap Resume to continue your saved transfer.':mode==='receive'?'Ready. Scan this invitation on the sending device.':'Connected. Choose your files, then tap the receiver.');
   } catch(e) {
     if(token!==attempt)return;
@@ -186,7 +212,7 @@ async function openRoom(host,codeOverride,collisions=0) {
 }
 function leaveRoom() {
   if(busy()){notice('Finish or cancel the file transfer before leaving.',true);return;}
-  attempt++;room?.close();room=null;members=[];connecting=false;
+  attempt++;resetPrepared();room?.close();room=null;members=[];connecting=false;
   $('room-info').hidden=true;roomState('closed');controls();notice('Disconnected. Receive Files creates a new invitation.');
 }
 function renderTrusted(){
@@ -213,21 +239,22 @@ function resumeSelected(event){if(!resumeRecord||!event.target.files.length)retu
 $('resume-picker').onchange=$('resume-folder-picker').onchange=resumeSelected;
 $('pause').onclick=()=>active?.pause();$('resume').onclick=()=>{reconnectAttempts=0;active?.resume();};
 $('debug-enabled').onchange=()=>{$('debug-log').hidden=!$('debug-enabled').checked;};
-const scanner=new Scanner($('scanner-video'),value=>{ $('scanner-dialog').close();try{const url=new URL(value);if(url.origin!==location.origin||url.pathname!==location.pathname)throw Error('That QR is not an invitation for this app.');$('room-code').value=parseRoom(value);void openRoom(false);}catch(e){notice(e.message||'Invalid invitation QR. Enter the code instead.',true);}},message=>{$('scanner-dialog').close();notice(message,true);});
+const scanner=new Scanner($('scanner-video'),value=>{ $('scanner-dialog').close();try{const url=new URL(value);if(url.origin!==location.origin||url.pathname!==location.pathname)throw Error('That QR is not an invitation for this app.');applyInviteMode(url);$('room-code').value=parseRoom(value);void openRoom(false);}catch(e){notice(e.message||'Invalid invitation QR. Enter the code instead.',true);}},message=>{$('scanner-dialog').close();notice(message,true);});
 $('scan-qr').onclick=()=>{if(!navigator.mediaDevices?.getUserMedia){notice('Camera unavailable. Enter the invitation code or paste its link.',true);return;}$('scanner-dialog').showModal();void scanner.start();};
 $('stop-scan').onclick=()=>{scanner.stop();$('scanner-dialog').close();$('room-code').focus();};
 $('scanner-dialog').addEventListener('close',()=>scanner.stop());
 document.addEventListener('visibilitychange',()=>{if(document.hidden&&$('scanner-dialog').open){scanner.stop();$('scanner-dialog').close();}});
-$('send').onclick=()=>setMode('send');$('receive').onclick=()=>{if(busy())return;setMode('receive');if(!room?.host)openRoom(true);};
+$('send').onclick=()=>{if(busy())return;setMode('send');if(!room)void openRoom(true);};$('receive').onclick=()=>{if(busy())return;setMode('receive');if(!room)void openRoom(true);};
 function selectFiles(e){
+  if(!selectedMember||!preparedConnection?.open||busy()){e.target.value='';notice('Connect to a receiver before selecting files.',true);return;}
   files=[...e.target.files];
   try {if(files.length)manifestFor(files);}
   catch(error){files=[];e.target.value='';notice(error.message,true);}
-  $('selection').textContent=files.length?`${files.length} file${files.length===1?'':'s'} · ${fmt(files.reduce((n,f)=>n+f.size,0))} · ${files.map(f=>f.name).join(', ')}`:'No files selected';renderDevices();
+  $('selection').textContent=files.length?`${files.length} file${files.length===1?'':'s'} · ${fmt(files.reduce((n,f)=>n+f.size,0))} · ${files.map(f=>f.name).join(', ')}`:'No files selected';renderDevices();if(files.length)startSend(selectedMember);
 }
 $('file-picker').onchange=$('folder-picker').onchange=selectFiles;
-$('create-room').onclick=()=>openRoom(true);$('join-room').onclick=()=>openRoom(false);
-$('room-code').onkeydown=e=>{if(e.key==='Enter')openRoom(false);};
+$('create-room').onclick=()=>openRoom(true);$('join-room').onclick=()=>{try{if(/^https?:/.test($('room-code').value.trim()))applyInviteMode(new URL($('room-code').value.trim()));}catch{}void openRoom(false);};
+$('room-code').onkeydown=e=>{if(e.key==='Enter')$('join-room').click();};
 $('retry-room').onclick=()=>{if(lastAttempt)openRoom(lastAttempt.host,lastAttempt.code);};
 $('leave-room').onclick=$('cancel-connection').onclick=leaveRoom;
 $('copy-room').onclick=async()=>{if(!room)return;try{await navigator.clipboard.writeText(room.code);notice('Code copied. Paste it on the sending device.');}catch{notice('Copy the displayed invitation code manually.');}};
@@ -238,15 +265,14 @@ $('cancel').onclick=()=>active?.cancel();$('decline').onclick=()=>active?.declin
 $('incoming').addEventListener('cancel',e=>{e.preventDefault();active?.decline();});
 $('accept').onclick=async()=>{
   if(active?.state!=='offered')return;await refreshAcceptance();if($('accept').disabled)return;
-  const capacity=await storageAvailability(active.total);
-  void navigator.storage?.persist?.().catch(()=>{});
-  void active.accept(directory?{storage:'directory',directory}:{storage:capacity.opfs?'opfs':'indexeddb'});closeRequest();controls();notice('Receiving files into persistent storage…');
+  void active.accept({storage:'directory',directory});closeRequest();controls();notice('Receiving directly into your device folder…');
 };
 async function chooseFolder() {
-  try {directory=await window.showDirectoryPicker({mode:'readwrite'});$('folder-status').textContent=`Saving to ${directory.name}. Verified files will appear here without a separate download.`;void refreshAcceptance();}
+  try {directory=await window.showDirectoryPicker({mode:'readwrite',startIn:'downloads',id:'wft-receive'});$('folder-status').textContent=`Saving directly to ${directory.name}. No second download step and no browser-stored file contents.`;debug('Device folder selected.');void refreshAcceptance();}
   catch(e){if(e.name!=='AbortError')notice('Could not access folder: '+e.message,true);}
 }
-for(const id of ['choose-folder','request-folder']) {$(id).hidden=!('showDirectoryPicker' in window);$(id).onclick=chooseFolder;}
+for(const id of ['choose-folder','request-folder']) {$(id).hidden=typeof window.showDirectoryPicker!=='function';$(id).onclick=chooseFolder;}
+$('direct-save-support').textContent=typeof window.showDirectoryPicker==='function'?'Browser permission is required once to choose a folder. Transfer progress metadata is stored locally for recovery; file contents stay in your selected folder.':'Direct device-folder saving is not supported by this browser. You can send here; to receive without browser storage, use desktop Chrome or Edge.';
 $('clear-history').onclick=()=>{if(!busy()){history=[];save();drawHistory();}};
 $('keep-awake').onchange=()=>void maintainWakeLock();
 $('network-check').onclick=async()=>{
@@ -257,9 +283,12 @@ $('network-check').onclick=async()=>{
 };
 try {$('device-name').value=localStorage.getItem('wft-device-name')||friendlyName();}catch{$('device-name').value=friendlyName();}
 $('device-name').onchange=()=>{const name=$('device-name').value.trim().slice(0,48)||friendlyName();$('device-name').value=name;try{localStorage.setItem('wft-device-name',name);}catch{}if(room){room.name=name;room.setMode(mode);}if(trust){trust.name=name;for(const {room:r} of trust.rooms.values()){r.name=name;r.setMode(mode||'send');}}};
-trust=new TrustedDevices({id:deviceId,name:$('device-name').value,mode:'send',onChange:()=>{renderDevices();renderTrusted();},onTransfer:incoming});
-void networkReady.then(()=>trust.load()).catch(()=>notice('Persistent storage is unavailable. Enable site storage to transfer files.',true));
-function consumeInvitation(){const params=new URLSearchParams(location.hash.slice(1));if(!(params.get('join')||params.get('room')))return;if(busy()&&active.state!=='reconnecting'){notice('Finish or cancel the active transfer before opening another invitation.',true);return;}$('room-code').value=params.get('join')||params.get('room');if(mode!=='send')setMode('send');window.history.replaceState(null,'',location.pathname+location.search);void openRoom(false);}
+trust=new TrustedDevices({id:deviceId,name:$('device-name').value,mode:'send',onChange:()=>{renderDevices();renderTrusted();},onTransfer:awaitTransfer});
+debug('Startup: checking private remembered-device connections.');
+void networkReady.then(()=>trust.load()).then(()=>{if(!mode)notice('Choose Send Files or Receive Files. Remembered devices appear automatically when online.');}).catch(()=>notice('Recovery metadata storage is unavailable. Enable site storage to transfer files.',true));
+function applyInviteMode(url){const requested=new URLSearchParams(url.hash.slice(1)).get('mode');if(['send','receive'].includes(requested))setMode(requested);else if(!mode)setMode('send');}
+function consumeInvitation(){const params=new URLSearchParams(location.hash.slice(1));if(!(params.get('join')||params.get('room')))return;if(busy()&&active.state!=='reconnecting'){notice('Finish or cancel the active transfer before opening another invitation.',true);return;}$('room-code').value=params.get('join')||params.get('room');applyInviteMode(new URL(location.href));window.history.replaceState(null,'',location.pathname+location.search);void openRoom(false);}
+$('refresh-devices').onclick=async()=>{$('refresh-devices').disabled=true;debug('Checking remembered devices again.');try{await networkReady;await trust.load();renderDevices();}catch(e){notice(e.message,true);}finally{$('refresh-devices').disabled=false;}};
 consumeInvitation();window.addEventListener('hashchange',consumeInvitation);
 window.addEventListener('beforeunload',event=>{if(busy()){event.preventDefault();event.returnValue='';}});
 window.addEventListener('offline',()=>notice('Internet connection lost. Existing transfers may continue; new pairing needs internet.',true));

@@ -1,4 +1,4 @@
-# Architecture — version 3
+# Architecture — version 3.1
 
 ```text
 GitHub Pages → HTML/CSS + local JavaScript bundles
@@ -30,7 +30,7 @@ File selection → consent manifest → 8 MiB logical block
 
 ## Sessions and trusted devices
 
-A new Receive action creates a private invitation. Twelve random characters are easier to type than a peer ID and provide materially more guessing resistance than six digits. New peer admission expires after ten minutes; current admitted peers can reconnect and finish. Peer IDs are not displayed in the ordinary UI. Roster membership does not prove a physical network location.
+Either Send or Receive creates a private invitation. Both screens share QR generation and scanning; invitations encode the opposite mode. Startup discovery loads remembered pairs. Choosing a receiver opens a raw file channel before exposing the file picker. Receiver transfer construction waits for the first hello (bounded to five minutes), so an idle file picker does not start the transfer heartbeat. Selection sends the manifest on that prepared channel. Consent remains mandatory. Twelve random characters are easier to type than a peer ID and provide materially more guessing resistance than six digits. New peer admission expires after ten minutes; current admitted peers can reconnect and finish. Peer IDs are not displayed in the ordinary UI. Roster membership does not prove a physical network location.
 
 Remembering sends a random 256-bit pair secret over an existing encrypted control connection and requires approval on both devices. Each side stores the other random application identity and a friendly name in IndexedDB. The lexicographically smaller identity hosts a private rendezvous whose address is SHA-256 of the secret; the other joins and proves possession through the encrypted join. Each pair is isolated. Forget closes the pair and deletes the local secret. This is bearer-secret pairing, not independently verified device certificates; signaling and application delivery are trusted.
 
@@ -48,6 +48,6 @@ States include connecting, waiting, offered, preparing, transferring, paused, re
 
 ## Storage and memory
 
-8 MiB part files live in a transfer-specific staging folder, or blocks are blobs in IndexedDB. Directory outputs receive collision-safe names; path traversal is rejected. Reconstruction reads/writes one block at a time and rechecks the whole-file hash. Until commit, roughly twice file size may be needed. Directory staging blocks are removed after verified output; OPFS blocks/output remain for recovery until the user removes saved data.
+New UI receives enforce requireDirectory: 8 MiB part files live in a transfer-specific staging folder under the selected device folder. Browser databases retain recovery metadata and handles, not received payloads. The retained protocol/storage modules can still read historical OPFS/IndexedDB records, but the current UI rejects new or resumed browser-payload receives. Directory outputs receive collision-safe names; path traversal is rejected. Reconstruction reads/writes one block at a time and rechecks the whole-file hash. Until commit, roughly twice file size may be needed. Directory staging blocks are removed after verified output; OPFS blocks/output remain for recovery until the user removes saved data.
 
-OPFS File objects back download URLs without an application-created full-file byte array. Without OPFS/directory, final fallback reconstruction is capped at 256 MiB. The browser may impose additional internal download memory/space limits. Directory permissions can require a fresh user gesture after reload. Browser eviction, actual disk failure and system suspension cannot be prevented by the app.
+OPFS File objects back download URLs without an application-created full-file byte array. The old internal IndexedDB reconstruction path is capped at 256 MiB and retained for historical recovery only; it is not offered for new receives. The browser may impose additional internal download memory/space limits. Directory permissions can require a fresh user gesture after reload. Browser eviction, actual disk failure and system suspension cannot be prevented by the app.

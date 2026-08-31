@@ -1,14 +1,14 @@
-# Wi-Fi File Transfer — version 3
+# Wi-Fi File Transfer — version 3.1
 
 [Open the app](https://dng0101.github.io/wifi-file-transfer-web/)
 
 ## Send a file
 
 1. Open the website on both devices.
-2. On the receiver, tap **Receive Files**. An invitation appears automatically.
-3. On the sender, tap **Send Files** and select files (or a folder). Scan the receiver's QR, paste its link, or enter its code.
-4. Tap the receiver's name. The receiver reviews the filenames and sizes and accepts.
-5. Wait for **Verified complete**. With a selected destination folder, files are already saved. Otherwise, use **Save to device**.
+2. Choose **Send Files** on one device and **Receive Files** on the other. Both sides show a QR, scanner, code and link. Either side can scan the other.
+3. Connect, then tap the receiver in **Available devices**. The app opens the file channel before showing the file picker.
+4. Select files or a folder. The transfer request is sent automatically—there is no separate upload or Send step. The receiver chooses a device folder and accepts.
+5. Wait for **Verified complete**. Files are already saved in the chosen device folder; there is no second download step.
 
 After connecting, **Remember device** asks for approval on both devices. On future visits, open the website on both devices and choose Send/Receive: remembered receivers appear without another code. Settings provides rename and forget.
 
@@ -16,9 +16,15 @@ After connecting, **Remember device** asks for approval on both devices. On futu
 
 Files are read in 8 MiB blocks and transported in frames of at most 64 KiB (16 KiB fallback when the negotiated maximum is unknown). The receiver writes blocks to persistent storage before acknowledging them. Neither side intentionally loads a complete large file into JavaScript memory. File size counters use safe JavaScript integers, not 32-bit offsets.
 
-For a 10 GB receiver, use desktop Chrome or Edge and **Choose download folder**, with roughly twice the file size free during final verification. OPFS browser storage also supports streaming when sufficient quota is available. Storage estimates are approximate, not guarantees. Incognito/private browsing, phones, OS limits, disk space, and download behavior can impose lower limits. Without OPFS or a folder, the IndexedDB fallback is limited to 256 MiB per batch for final download reconstruction. No blanket 10 GB guarantee is made for every browser or network. See [test evidence](TEST_REPORT.md).
+New receives require **Choose device folder** in a browser supporting showDirectoryPicker (desktop Chrome/Edge). File payloads and temporary blocks go into that folder, never OPFS or IndexedDB. Only recovery metadata, hashes and permission handles remain in browser storage. Allow roughly twice the file size free during verification; folder free space cannot be measured reliably. Browsers without this API can send but cannot receive in direct-save mode. Existing v3 browser-stored downloads can still be recovered/deleted, but an old browser-storage transfer must be restarted into a device folder. See [browser API restrictions](https://developer.mozilla.org/en-US/docs/Web/API/Window/showDirectoryPicker) and [test evidence](TEST_REPORT.md).
 
 Each 8 MiB block has SHA-256 verification. Corrupt transport blocks are retried up to three times. Whole-file SHA-256 is computed incrementally in a worker on the sender and checked again from persisted blocks on the receiver. Completion requires the receiver's final acknowledgement.
+
+## Startup and transfer timing
+
+Available devices are checked automatically at startup and refreshed for remembered private pairs; Check again triggers another check. This is not unrestricted LAN scanning and does not prove devices share a Wi-Fi network. Diagnostic events are enabled and shown by default; they can be disabled or collapsed.
+
+Selecting a file reads metadata only, then sends the offer on the already-open channel. File bytes are read in blocks after receiver consent, without pre-uploading or pre-hashing the entire file. Transfer duration still depends on file size, disk speed, network bandwidth, permission prompts and verification. Instant completion is not promised. Idle prepared channels expire after five minutes.
 
 ## Pause, interruption, and recovery
 

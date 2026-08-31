@@ -1,9 +1,9 @@
-# Feature matrix — version 3
+# Feature matrix — version 3.1
 
 | Feature | Implementation |
 |---|---|
-| Simple Send / Receive home | Main journey; technical room fields removed |
-| QR, code, invite link | Local generation/decoding, auto join including hash changes, ten-minute expiry |
+| Simple Send / Receive home | Connect first; picker appears after the file channel opens |
+| QR, code, invite link | QR and scanner on both roles; opposite-mode invites; ten-minute expiry |
 | Private available receivers | Invited session peers and up to eight mutually remembered devices |
 | Rename / forget | Persistent settings; forgetting revokes local pair |
 | Files / folders / binary / empty | Up to 200 files, safe relative paths, collision-safe outputs |
@@ -14,7 +14,9 @@
 | Disconnect / reload recovery | Durable block records, source reselection and destination permission where required |
 | Corruption | Block NACK/retry, saved-prefix repair, final whole-file SHA-256 |
 | Honest progress / history | Durable bytes, rolling speed, ETA, final verification state |
-| Persistent downloads | OPFS or directory; IndexedDB-only fallback capped at 256 MiB |
+| Persistent downloads | New receives require device folder; old browser-stored downloads remain recoverable |
+| Startup discovery / diagnostics | Private remembered peers checked automatically; diagnostics on by default |
+| No upload step | Selection sends the offer immediately; bytes begin after consent |
 | Wake lock / camera fallback | Capability detected, permission failure does not block code pairing |
 | Offline shell | Cached static UI; pairing still needs internet |
 | TURN | Retired PeerJS relay removed; optional HTTPS temporary-credential endpoint |

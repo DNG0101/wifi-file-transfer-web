@@ -170,6 +170,7 @@ export class BlockTransfer {
       this.id=m.id;this.token=m.token;this.manifest=manifestFor(m.manifest);this.total=this.manifest.reduce((n,f)=>n+f.size,0);this.peerPaused=!!m.paused;
       const saved=await this.store.get('receive:'+this.id);this.guard(epoch);
       if(saved) {
+        if(this.options.requireDirectory&&saved.storage!=='directory')throw Error('This older transfer used browser storage. Start a new transfer and choose a device folder.');
         if(saved.token!==m.token||saved.senderId!==m.senderId||saved.receiverId!==m.receiverId||!sameManifest(saved.manifest,this.manifest))throw Error('This transfer ID belongs to another sender or file.');
         this.record=saved;this.transition('preparing','Recovering saved transfer progress…');this.storage=await this.Storage.open(saved);this.guard(epoch);
         for(let f=0;f<saved.files.length;f++)if(!saved.files[f].complete){const valid=await this.storage.verifyPrefix(f,saved.files[f]);if(valid!==saved.files[f].next){saved.files[f].next=valid;saved.files[f].hashes=saved.files[f].hashes.slice(0,valid);}}
@@ -216,6 +217,7 @@ export class BlockTransfer {
   async accept(destination) {
     if(this.state!=='offered')return;const epoch=this.epoch;this.transition('preparing','Preparing persistent storage…');
     try {
+      if(this.options.requireDirectory&&(destination?.storage!=='directory'||!destination.directory))throw Error('Choose a device folder. Browser-stored file contents are disabled.');
       this.record={id:'receive:'+this.id,transferId:this.id,token:this.token,direction:'receive',manifest:this.manifest,files:this.manifest.map(emptyFile),senderId:this.pendingHello.senderId,receiverId:this.pendingHello.receiverId,created:Date.now(),state:'transferring',storage:destination.storage,directory:destination.directory};
       this.storage=await this.Storage.open(this.record);if(this.state==='cancelled'){await this.storage.cleanup();return;}this.guard(epoch);await this.store.put(this.record);this.guard(epoch);this.acceptState();
     }catch(e){this.handleError(e);}
