@@ -1,10 +1,10 @@
-# Browser compatibility
+# Browser compatibility (v2)
 
-| Browser | Pairing / transfer | Direct folder writes | Notes |
-| --- | --- | --- | --- |
-| Chrome / Edge recent | Supported | Supported on desktop Chromium | File System Access API is the preferred large-file path |
-| Firefox recent | Supported where WebRTC DataChannel is available | Not generally available | Use verified browser downloads |
-| Safari recent | Supported on modern versions | Limited / version-dependent | Keep both tabs open and use downloads if folder access is unavailable |
-| iOS browsers | WebRTC support varies by OS version | Usually unavailable | Downloads and memory limits are more constrained |
+| Capability | Chrome / Edge desktop | Chrome Android | Firefox | Safari / iOS |
+|---|---|---|---|---|
+| WebRTC room/file connection | Supported, Chromium tested | Expected, not physically tested | Expected, not tested | Expected in modern versions, not tested |
+| Choose receive folder | Where showDirectoryPicker is available | Generally unavailable | Unavailable | Unavailable |
+| Receive via in-tab download | Yes | Yes, device limits apply | Expected | Expected, device limits apply |
+| Native Wi-Fi scan / Android APK interoperability | No | No | No | No |
 
-Use HTTPS in production. Localhost development is also a secure context. A public STUN server is configured for connectivity assistance; the signaling text is still manual and contains no file bytes. Some networks may block peer connectivity, especially across restrictive NATs or enterprise firewalls.
+HTTPS is required outside localhost. Keep pages in the foreground. Without a directory picker, accepted batches and outstanding downloads share a 256 MiB memory limit. Browser and OS memory/download behavior may impose lower practical limits. All files use generic binary downloads rather than being automatically opened.
