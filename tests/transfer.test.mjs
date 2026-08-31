@@ -24,3 +24,28 @@ test('disconnection fails both sides and aborts partial writer',async()=>{const[
 test('slow disk writes serialize and produce accurate bytes',async()=>{const[a,b]=pair();let writes=0,max=0,total=0;const receiver=new Transfer(b,{onOffer:(_,t)=>t.accept(()=>({write:async bytes=>{writes++;max=Math.max(max,writes);await wait(2);total+=bytes.length;writes--;},close:async()=>({}),abort:async()=>{}}))});const sender=new Transfer(a,{files:[new File([new Uint8Array(160001)],'slow.bin')]});await until(()=>sender.terminal());assert.equal(sender.state,'complete');assert.equal(max,1);assert.equal(total,160001);a.close();});
 test('invalid manifest and unsafe filenames',()=>{assert.throws(()=>validateManifest([{name:'bad',size:-1}]));assert.throws(()=>validateManifest([]));assert.throws(()=>validateManifest([{name:'bad',size:Infinity}]));assert.equal(safeName('../nested/evil.exe'),'evil.exe');assert.equal(safeName('C:\\folder\\a?.txt'),'a_.txt');});
 test('folder saving avoids existing names',async()=>{const names=new Set(['same.txt']);let chosen;const dir={getFileHandle:async(name,options)=>{if(options?.create){chosen=name;names.add(name);return {createWritable:async()=>({write:async()=>{},close:async()=>{},abort:async()=>{}})};}if(!names.has(name))throw Object.assign(Error(),{name:'NotFoundError'});return {};}};const sink=await directorySink(dir,{name:'same.txt'});await sink.close();assert.equal(chosen,'same.txt (1)');});
+test('cancelling while a file writer is being created aborts the late writer',async()=>{
+  const[a,b]=pair();let release,started=false,aborted=false,exposed=false;
+  const receiver=new Transfer(b,{onOffer:(_,t)=>t.accept(async()=>{started=true;return new Promise(r=>{release=r;});}),onFile:()=>{exposed=true;}});
+  const sender=new Transfer(a,{files:[new File(['bytes'],'pending.bin')]});
+  await until(()=>started);receiver.cancel();
+  release({write:async()=>{throw Error('must not write after cancellation');},close:async()=>({}),abort:async()=>{aborted=true;}});
+  await until(()=>aborted&&sender.terminal());assert.equal(receiver.state,'cancelled');assert.equal(receiver.current,null);assert.equal(exposed,false);
+});
+test('cancelling while a completed writer is closing never exposes a download',async()=>{
+  const[a,b]=pair();let release,closing=false,exposed=false;
+  const receiver=new Transfer(b,{onOffer:(_,t)=>t.accept(()=>({write:async()=>{},close:async()=>{closing=true;return new Promise(r=>{release=r;});},abort:async()=>{}})),onFile:()=>{exposed=true;}});
+  const sender=new Transfer(a,{files:[new File(['x'],'close.bin')]});await until(()=>closing);receiver.cancel();release({});
+  await until(()=>sender.terminal());assert.equal(receiver.state,'cancelled');assert.equal(exposed,false);
+});
+test('disk errors propagate a useful error to the sender',async()=>{
+  const[a,b]=pair();let detail;
+  const receiver=new Transfer(b,{onOffer:(_,t)=>t.accept(()=>({write:async()=>{throw Error('Not enough disk space');},abort:async()=>{}}))});
+  const sender=new Transfer(a,{files:[new File(['x'],'disk.bin')],onUpdate:u=>detail=u.detail});await until(()=>sender.terminal());assert.equal(sender.state,'failed');assert.equal(detail,'Not enough disk space');assert.equal(receiver.state,'failed');
+});
+test('oversized manifests fail before creating an oversized WebRTC frame',()=>{
+  assert.throws(()=>validateManifest(Array.from({length:1000},()=>({name:'x'.repeat(180),size:1}))),/smaller batch/);
+});
+test('early completion acknowledgements cannot report false success',async()=>{
+  const[a,b]=pair();const sender=new Transfer(a,{files:[new File(['x'],'file')]});b.send(JSON.stringify({type:'done-ack'}));await until(()=>sender.terminal());assert.equal(sender.state,'failed');
+});

@@ -13,4 +13,4 @@ Reference: D:/Downloads/send files.apk, inspected as ZIP/DEX strings. Package re
 | Transfer list | Local progress and history metadata |
 | Background service | Not available; browser pages must remain open and awake |
 
-This site does not implement the APK's wire protocol. Both devices must use the website. Browser discovery cannot enumerate arbitrary LAN devices. Network pairing depends on a public signaling service; file bytes are sent directly.
+This site does not implement the APK's wire protocol. Both devices must use the website. Browser discovery cannot enumerate arbitrary LAN devices. Network pairing depends on a signaling service; file bytes use encrypted WebRTC directly or via an available TURN relay. Version 3 adds expiring invitations and explicitly remembered private device pairs.

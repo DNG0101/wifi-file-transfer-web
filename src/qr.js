@@ -1,0 +1,6 @@
+import jsQR from 'jsqr';
+export class Scanner {
+ constructor(video,onResult,onError){Object.assign(this,{video,onResult,onError});this.generation=0;}
+ async start(){this.stop();const generation=this.generation;try{const stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:'environment'},audio:false});if(generation!==this.generation){stream.getTracks().forEach(t=>t.stop());return;}this.stream=stream;this.video.srcObject=stream;await this.video.play();const canvas=document.createElement('canvas'),ctx=canvas.getContext('2d',{willReadFrequently:true});this.timer=setInterval(()=>{if(!this.video.videoWidth)return;canvas.width=Math.min(640,this.video.videoWidth);canvas.height=Math.round(canvas.width*this.video.videoHeight/this.video.videoWidth);ctx.drawImage(this.video,0,0,canvas.width,canvas.height);const pixels=ctx.getImageData(0,0,canvas.width,canvas.height),result=jsQR(pixels.data,canvas.width,canvas.height);if(result){this.stop();this.onResult(result.data);}},250);}catch(e){this.stop();this.onError(e.name==='NotAllowedError'?'Camera access was denied. Enter the code or paste an invite link instead.':'Camera unavailable. Enter the code or paste the invitation link.');}}
+ stop(){this.generation++;clearInterval(this.timer);this.stream?.getTracks().forEach(t=>t.stop());this.stream=null;this.video.srcObject=null;}
+}

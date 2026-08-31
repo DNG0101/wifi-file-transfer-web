@@ -13,6 +13,7 @@ export function validateManifest(files) {
     if (!Number.isSafeInteger(total)) throw Error('File selection is too large.');
     return {name:safeName(f.name),size:f.size};
   });
+  if (new TextEncoder().encode(JSON.stringify(clean)).length > 45*1024) throw Error('Too many long filenames for one request. Send a smaller batch.');
   return clean;
 }
 
@@ -22,14 +23,15 @@ export class Transfer {
     this.conn = conn; this.options = options; this.state = 'connecting';
     this.direction = options.files ? 'send' : 'receive'; this.files = options.files;
     this.index = -1; this.completedBytes = 0; this.ack = 0; this.sent = 0;
-    this.lastActivity = Date.now(); this.queue = Promise.resolve();
+    this.lastActivity = Date.now(); this.queue = Promise.resolve(); this.lastRender = 0;
     conn.on('data', raw => {
       this.queue = this.queue.then(() => this.receive(raw)).catch(e => this.fail(e.message));
     });
     conn.on('close', () => this.fail('Connection closed. Keep both pages open and try again.'));
     conn.on('error', e => this.fail(e.message || 'Connection failed.'));
     this.watch = setInterval(() => {
-      if (Date.now() - this.lastActivity > (['offered','waiting'].includes(this.state) ? 120000 : 60000)) this.fail('Transfer timed out. Check both devices and try again.');
+      const limit=this.state==='connecting'?25000:['offered','waiting'].includes(this.state)?180000:60000;
+      if (Date.now() - this.lastActivity > limit) this.fail(this.state==='connecting'?'Could not connect to this device. Run Network check or retry the connection.':'Transfer timed out. Keep both pages visible and try again.');
     }, 1000);
     if (this.files) {
       const start = () => this.run().catch(e => this.fail(e.message));
@@ -38,7 +40,10 @@ export class Transfer {
   }
   terminal() { return ['complete','failed','declined','cancelled'].includes(this.state); }
   emit(state = this.state, detail = '') {
+    const changed=state!==this.state;
     this.state = state;
+    if (!changed && !detail && !this.terminal() && Date.now()-this.lastRender<100) return;
+    this.lastRender=Date.now();
     this.options.onUpdate?.({state,detail,direction:this.direction,files:this.manifest || [],bytes:this.completedBytes + (this.direction === 'send' ? this.ack : this.current?.received || 0),total:this.total || 0});
   }
   control(type, rest = {}) {
@@ -49,7 +54,7 @@ export class Transfer {
     const started = Date.now();
     while (!predicate()) {
       if (this.terminal()) throw Error('Transfer stopped.');
-      if (Date.now() - started > 120000) throw Error('Device did not respond.');
+      if (Date.now() - started > (this.state==='waiting'?180000:120000)) throw Error('Device did not respond.');
       await new Promise(resolve => setTimeout(resolve, 10));
     }
   }
@@ -73,8 +78,9 @@ export class Transfer {
       await this.until(()=>this.fileDone);
       this.completedBytes += file.size; this.ack = 0; this.emit();
     }
-    this.control('done'); await this.until(()=>this.doneAck);
+    this.awaitingDone=true;this.control('done'); await this.until(()=>this.doneAck);
     clearInterval(this.watch); this.emit('complete');
+    setTimeout(()=>this.conn.close(),500);
   }
   async receive(raw) {
     if (this.terminal()) return;
@@ -85,20 +91,22 @@ export class Transfer {
       const c = this.current;
       if (!bytes.length || bytes.length > CHUNK || c.received+bytes.length > c.file.size) throw Error('Invalid file chunk.');
       c.hash.update(bytes); await c.sink.write(bytes); c.received += bytes.length;
+      if(this.terminal())return;
       this.control('ack',{index:this.index,bytes:c.received}); this.emit(); return;
     }
     if (raw.length > 1024*1024) throw Error('Control message too large.');
     const m = JSON.parse(raw);
     if (!m || typeof m.type !== 'string') throw Error('Invalid transfer message.');
     if (m.type === 'cancel' || m.type === 'decline' || m.type === 'error') {
-      this.fail(m.type === 'decline' ? 'Receiver declined the transfer.' : 'The other device stopped the transfer.',m.type==='decline'?'declined':'cancelled',false); return;
+      const reason=typeof m.reason==='string'?m.reason.slice(0,200):m.type==='decline'?'Receiver declined the transfer.':'The other device stopped the transfer.';
+      this.fail(reason,m.type==='decline'?'declined':m.type==='error'?'failed':'cancelled',false); return;
     }
     if (this.direction === 'send') {
       if (m.type === 'accept' && this.state === 'waiting') this.accepted = true;
       else if (m.type === 'ready' && m.index === this.index) this.ready = true;
       else if (m.type === 'ack' && m.index === this.index && Number.isSafeInteger(m.bytes) && m.bytes>=this.ack && m.bytes<=this.sent) { this.ack=m.bytes; this.emit(); }
       else if (m.type === 'file-done' && m.index === this.index) this.fileDone=true;
-      else if (m.type === 'done-ack') this.doneAck=true;
+      else if (m.type === 'done-ack' && this.awaitingDone) this.doneAck=true;
       else throw Error('Unexpected transfer acknowledgement.');
       return;
     }
@@ -108,13 +116,16 @@ export class Transfer {
     }
     if (m.type === 'start' && this.accepted && !this.current && m.index===this.index+1 && m.index<this.manifest.length) {
       this.index=m.index; const file=this.manifest[this.index];
-      this.current={file,received:0,hash:sha256.create(),sink:await this.sinkFactory(file,this.index)};
+      const sink=await this.sinkFactory(file,this.index);
+      if(this.terminal()){await sink.abort?.();return;}
+      this.current={file,received:0,hash:sha256.create(),sink};
       this.emit('transferring'); this.control('ready',{index:this.index}); return;
     }
     if (m.type === 'end' && this.current && m.index===this.index) {
       const c=this.current;
       if (c.received!==c.file.size || bytesToHex(c.hash.digest())!==m.hash) throw Error('File integrity check failed. Please resend.');
       const result=await c.sink.close();
+      if(this.terminal())return;
       this.options.onFile?.({...c.file,...result});
       this.completedBytes+=c.file.size; this.current=null;
       this.control('file-done',{index:this.index}); this.emit(); return;
@@ -133,9 +144,10 @@ export class Transfer {
   cancel() { this.fail('Transfer cancelled.','cancelled',true); }
   fail(detail,state='failed',notify=true) {
     if (this.terminal()) return;
-    if (notify && this.conn.open) { try {this.control(state==='declined'?'decline':'cancel');}catch{} }
+    if (notify && this.conn.open) { try {this.control(state==='declined'?'decline':state==='failed'?'error':'cancel',{reason:detail.slice(0,200)});}catch{} }
     clearInterval(this.watch); this.emit(state,detail);
-    Promise.resolve(this.current?.sink.abort?.()).catch(()=>{});
+    const sink=this.current?.sink;
+    Promise.resolve().then(()=>sink?.abort?.()).catch(()=>{});
     this.current=null;
     setTimeout(()=>this.conn.close(),100);
   }

@@ -1,17 +1,22 @@
-# Feature matrix (v2)
+# Feature matrix — version 3
 
-| Feature | Status |
+| Feature | Implementation |
 |---|---|
-| Send / Receive home controls | Implemented |
-| Shared room code and invite link | Implemented; internet pairing required |
-| Room receiver list | Implemented; not LAN scanning |
-| Explicit accept / decline | Implemented |
-| Any file type, multiple files, empty files | Implemented; size/storage limits apply |
-| Progress and local transfer history | Implemented |
-| Cancellation and failure reporting | Implemented |
-| Chunking, backpressure, SHA-256 verification | Implemented and tested |
-| Direct-to-folder receiving | When browser supports File System Access |
-| Download fallback | Up to 256 MiB including undismissed downloads |
-| Resume after disconnect | Not implemented |
-| TURN relay for restrictive networks | Not configured |
-| Android native app interoperability | Not supported |
+| Simple Send / Receive home | Main journey; technical room fields removed |
+| QR, code, invite link | Local generation/decoding, auto join including hash changes, ten-minute expiry |
+| Private available receivers | Invited session peers and up to eight mutually remembered devices |
+| Rename / forget | Persistent settings; forgetting revokes local pair |
+| Files / folders / binary / empty | Up to 200 files, safe relative paths, collision-safe outputs |
+| Explicit accept / decline | Required before new file bytes |
+| Large file streaming | 8 MiB durable blocks; maximum 64 KiB frames; practical storage limits apply |
+| Backpressure | Native bufferedamountlow plus bounded outstanding block |
+| Pause / resume | Local and peer pause flags |
+| Disconnect / reload recovery | Durable block records, source reselection and destination permission where required |
+| Corruption | Block NACK/retry, saved-prefix repair, final whole-file SHA-256 |
+| Honest progress / history | Durable bytes, rolling speed, ETA, final verification state |
+| Persistent downloads | OPFS or directory; IndexedDB-only fallback capped at 256 MiB |
+| Wake lock / camera fallback | Capability detected, permission failure does not block code pairing |
+| Offline shell | Cached static UI; pairing still needs internet |
+| TURN | Retired PeerJS relay removed; optional HTTPS temporary-credential endpoint |
+| APK interoperability / unrestricted LAN scan | Not supported; browser limitations documented |
+| Concurrent transfers | One active batch per tab; no automatic multi-peer queue |

@@ -1,11 +1,12 @@
-# Known limitations (v2)
+# Operational limits and remaining validation
 
-- Browser discovery lists only app users in the same shared room. It cannot scan all Wi-Fi devices or connect to the reference Android APK.
-- Room pairing needs PeerJS Cloud and STUN internet access. No service availability guarantee or TURN relay is provided.
-- Guest Wi-Fi isolation, VPNs, firewalls, and restrictive NAT may prevent a direct WebRTC connection.
-- Keep both tabs awake; page closure or suspension can interrupt transfer. No resumable transfers.
-- Keep the room creator connected for discovery. If it leaves, re-create a room. Active independent file connections can finish.
-- In-memory receiving is limited to 256 MiB total. Save and dismiss downloads to release memory. Folder streaming requires browser File System Access support.
-- An interrupted disk transfer may leave an empty placeholder. Existing files are never intentionally overwritten.
-- Device names are self-declared, not verified identities. Share room codes privately and confirm sender identity before acceptance.
-- Cross-platform, multi-gigabyte, and physical-LAN testing remains necessary.
+- Discovery is scoped to invitations and remembered pairs; it cannot enumerate arbitrary LAN devices.
+- Public signaling has no availability guarantee. PeerJS's free TURN service was discontinued; an operator-managed TURN service is required on networks that block direct routes.
+- Physical Android/iOS devices, different mobile carriers, restrictive enterprise NATs and real Wi-Fi outages require deployment-environment testing. Automated Chromium tests do not certify these.
+- Browser storage can be evicted; private browsing may have very small quotas. Folder free space cannot be reliably measured with the available browser API.
+- Keep pages awake/visible. Source files must be reselected after sender reload; destination folder access may need renewal after receiver reload.
+- Directory reconstruction may leave an empty placeholder if aborted; existing files are never intentionally overwritten.
+- One active batch per tab, up to 200 files. Large folder manifests can hit the 32 KiB metadata cap and must be split.
+- Discovery identities and friendly names are self-declared. Trust relies on private invitations/pair secrets, encrypted channels and trusted app/signaling delivery, not independent device attestation.
+- Optional TURN credentials are loaded at startup; reload before a new session after they expire.
+- See TEST_REPORT.md for measured evidence and explicitly untested cases.
