@@ -1,0 +1,17 @@
+{
+  "name": "Wi-Fi File Transfer",
+  "short_name": "File Transfer",
+  "description": "Private peer-to-peer file transfers in your browser.",
+  "start_url": ".",
+  "display": "standalone",
+  "background_color": "#061318",
+  "theme_color": "#061318",
+  "icons": [
+    {
+      "src": "favicon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}
