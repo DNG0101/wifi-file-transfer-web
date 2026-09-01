@@ -1,6 +1,6 @@
 // Network first: an old installed app must receive the new protocol and interface.
-const CACHE='wft-shell-v7';
-const SHELL=['./','./index.html','./assets/app.js?v=4.0','./assets/app.css?v=4.0','./assets/hash-worker.js','./favicon.svg','./manifest.webmanifest','./connection-config.json'];
+const CACHE='wft-shell-v8';
+const SHELL=['./','./index.html','./assets/app.css?v=4.2','./src/app.js?v=4.3','./src/room.js','./src/block-transfer.js','./src/storage.js','./src/presence-peer.js','./src/presence-db.js','./src/main-peer.js','./favicon.svg','./manifest.webmanifest','./connection-config.json'];
 self.addEventListener('install',event=>event.waitUntil((async()=>{const cache=await caches.open(CACHE);await cache.addAll(SHELL);await self.skipWaiting();})()));
 self.addEventListener('activate',event=>event.waitUntil((async()=>{for(const key of await caches.keys())if(key.startsWith('wft-shell-')&&key!==CACHE)await caches.delete(key);await self.clients.claim();})()));
 self.addEventListener('fetch',event=>{
