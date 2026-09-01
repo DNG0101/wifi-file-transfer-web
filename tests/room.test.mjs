@@ -44,5 +44,22 @@ test('disconnected rooms refuse new file connections',async()=>{
 });
 test('expired invitations reject new devices without interrupting existing members',async()=>{
  const room=new Room({},{PeerClass:FakePeer,inviteLifetime:-1});const opening=room.open('abcdefgh2345',true,'Host','receive');room.peer.emit('open');await opening;
- const guest=new FakeConn('new-device');room.incoming(guest);guest.emit('data',{type:'join',code:'abcdefgh2345',member:{name:'New',mode:'send',deviceId:crypto.randomUUID()}});assert.equal(guest.open,false);assert.equal(room.members.size,1);room.close();
+ const guest=new FakeConn('new-device');room.incoming(guest);guest.emit('data',{type:'join',code:'abcdefgh2345',member:{name:'New',mode:'send',deviceId:crypto.randomUUID()}});assert.deepEqual(guest.sent.at(-1),{type:'rejected',reason:'expired'});assert.equal(room.members.size,1);room.close();
+});
+
+test('expired invitation gives the guest a specific new-QR recovery message',async()=>{
+ const room=new Room({},{PeerClass:FakePeer});
+ const opening=room.open('abcdefgh2345',false,'Guest','send');
+ room.peer.emit('open');await Promise.resolve();
+ const failure=assert.rejects(opening,/expired.*New invitation/);
+ room.control.emit('data',{type:'rejected',reason:'expired'});
+ await failure;room.close();
+});
+test('unavailable QR creator rejects the join immediately instead of waiting for timeout',async()=>{
+ const room=new Room({},{PeerClass:FakePeer});
+ const opening=room.open('abcdefgh2345',false,'Guest','send');
+ room.peer.emit('open');await Promise.resolve();
+ const failure=assert.rejects(opening,/unavailable/);
+ room.peer.emit('error',{type:'peer-unavailable'});
+ await failure;room.close();
 });

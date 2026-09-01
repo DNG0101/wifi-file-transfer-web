@@ -69,6 +69,7 @@ export class Room {
           : `Connection failed (${e.type || 'network'}). Check internet access and try again.`;
         if (!opened) { clearTimeout(timeout); this.timers.delete(timeout); reject(Error(msg)); }
         else {
+          if(e.type==='peer-unavailable'&&this.rejectJoin){this.rejectJoin(Error(msg));this.rejectJoin=null;this.control?.close();}
           this.report(msg);
           if (!['peer-unavailable','webrtc'].includes(e.type)) this.setState('disconnected', msg);
         }
@@ -103,6 +104,7 @@ export class Room {
       conn.on('open', () => { if (!this.closed) conn.send({type:'join',code:this.code,member:this.self()}); });
       conn.on('data', m => {
         if (this.closed || this.control !== conn) return;
+        if(m?.type==='rejected'){clearTimeout(timeout);this.timers.delete(timeout);this.rejectJoin=null;reject(Error(m.reason==='expired'?'This invitation has expired. Ask the other device to tap New invitation, then scan its new QR.':'The invitation was rejected. Ask for a new QR.'));conn.close();return;}
         if (m?.type === 'members' && Array.isArray(m.members) && m.members.some(x => x?.id === this.id)) {
           if(Number.isFinite(m.expires))this.expires=m.expires;
           clearTimeout(timeout); this.timers.delete(timeout); joined = true; this.rejectJoin = null;
@@ -153,7 +155,7 @@ export class Room {
       conn.on('data', m => {
         if (this.closed) return;
         if (m?.type !== 'join' || m.code !== this.code || !memberIsValid({...m.member,id:conn.peer})) { conn.close(); return; }
-        if(Date.now()>this.expires&&!this.members.has(conn.peer)&&!this.admitted.has(conn.peer)){conn.close();return;}
+        if(Date.now()>this.expires&&!this.members.has(conn.peer)&&!this.admitted.has(conn.peer)){conn.send({type:'rejected',reason:'expired'});this.later(()=>conn.close(),300);return;}
         if(this.settings.expectedDeviceId&&m.member.deviceId!==this.settings.expectedDeviceId){conn.close();return;}
         clearTimeout(timer); this.timers.delete(timer);
         this.admitted.add(conn.peer);

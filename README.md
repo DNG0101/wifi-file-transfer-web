@@ -73,3 +73,9 @@ Browser tests require installed Google Chrome and internet access. The large tes
 Publish main, root directory. Commit source, lockfile, `assets/app.js`, and `assets/hash-worker.js` together after building. Relative URLs support repository subpaths. The service worker caches an offline app shell; it does not provide offline signaling. See [deployment](DEPLOYMENT.md).
 
 The original static application remains at `legacy.html` for reference. Version 2's transfer module and regression tests remain during migration; the current interface uses the version 3 block protocol. Reload both devices after upgrading. One active transfer per tab is intentional to prevent conflicting destination writes; a batch can contain up to 200 files.
+
+### QR connection help (3.2)
+
+Open this site on both devices. Choose Send on one and Receive on the other. Keep one QR visible and scan it with the other device’s in-app scanner; scanning both ways is unnecessary. Allow camera permission and fit the whole QR in view. You can also paste the invitation link or code. If an invitation expired, its creator should choose New invitation. Keep both pages open during pairing.
+
+QR regressions: npm run test:qr exercises actual QR decoding from synthetic camera video and real browser pairing. It does not substitute for physical phone camera tests.

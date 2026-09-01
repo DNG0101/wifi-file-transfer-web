@@ -1,6 +1,6 @@
 {
   "name": "wifi-file-transfer-web",
-  "version": "3.1.0",
+  "version": "3.2.0",
   "private": true,
   "type": "module",
   "scripts": {
@@ -9,7 +9,8 @@
     "dev": "node scripts/serve.mjs",
     "test:browser": "node tests/browser-integration.mjs",
     "test:ui": "node tests/ui-browser.mjs",
-    "test:large": "node tests/large-browser.mjs"
+    "test:large": "node tests/large-browser.mjs",
+    "test:qr": "node tests/qr-browser.mjs"
   },
   "dependencies": {
     "@noble/hashes": "1.8.0",

@@ -1,3 +1,14 @@
+## Version 3.2 QR pairing fixes
+
+- QR scanning, pasted invites, and shared links use the same validated parser. The directory and index.html forms of the same Pages app are accepted; unrelated origins and paths are rejected.
+- Scanning a new invitation supersedes an unfinished local pairing attempt. Stale attempts cannot open a peer after network configuration resolves.
+- Self-scans and repeated scans preserve the current room and roles. A disconnected guest can scan again to reconnect.
+- Camera requests and video playback are generation-guarded; cancelled or late requests cannot revive scanning or stop a newer session. Frame-read errors release the camera and show recovery guidance.
+- Camera frames retain up to 1280px width; generated QRs have a full four-module quiet zone. Invites omit irrelevant query parameters.
+- Expired invitations explain how to obtain a fresh QR. Offline creators fail promptly rather than waiting out the join timeout.
+- 41 automated tests passed. New QR browser regression uses synthetic camera video containing actual generated QR pixels through the production scanner, with real PeerJS/WebRTC pairing in both directions. It checks repeated/self scans, role selection, opening the file channel, and invitation arrival during startup.
+- Physical phone-camera autofocus, permissions, glare, and separate-device/router behavior still require hardware testing. No relay was added; networks blocking direct WebRTC may need a configured TURN service.
+
 # Test report — version 3.1
 
 ## Connection-first / direct-save update
