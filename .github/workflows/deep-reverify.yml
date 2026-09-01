@@ -17,7 +17,6 @@ jobs:
       - run: python3 scripts/deep_receiver_fix.py
       - run: npm ci
       - run: npm test
-      - run: npx playwright install --with-deps chromium
       - run: node tests/multi-online-browser.mjs
       - name: Commit verified receiver state fix
         run: |
@@ -27,4 +26,4 @@ jobs:
           git diff --cached --check
           git commit -m "Fix multi receiver selection and UI lock state"
           git push
-# verification revision 2
+# verification revision 3
