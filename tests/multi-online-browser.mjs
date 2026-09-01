@@ -21,8 +21,6 @@ const browser=await chromium.launch({channel:'chrome',headless:true});
 const errors=[];
 let a,b,c,ctxA,ctxB,ctxC;
 try{
-  // Separate contexts simulate three real users: distinct localStorage, UUID,
-  // IndexedDB, OPFS and Web Locks.
   ctxA=await browser.newContext({acceptDownloads:true});
   ctxB=await browser.newContext({acceptDownloads:true});
   ctxC=await browser.newContext({acceptDownloads:true});
@@ -33,6 +31,11 @@ try{
     await p.goto(url,{waitUntil:'domcontentloaded'});
   }
   const setName=async(p,name)=>p.evaluate(name=>{const e=document.querySelector('#device-name');e.value=name;e.dispatchEvent(new Event('change',{bubbles:true}));},name);
+  const chooseFile=async(p,name,size,value)=>{
+    const disabled=await p.locator('#file-picker').isDisabled();
+    assert.equal(disabled,false,`file picker must be enabled after selecting ${name}`);
+    await p.evaluate(({name,size,value})=>{const input=document.querySelector('#file-picker'),dt=new DataTransfer();dt.items.add(new File([new Uint8Array(size).fill(value)],name,{type:'application/octet-stream'}));input.files=dt.files;input.dispatchEvent(new Event('change',{bubbles:true}));},{name,size,value});
+  };
   await setName(a,'Sender A');await setName(b,'Receiver B');await setName(c,'Receiver C');
   await Promise.all([a,b,c].map(p=>p.locator('#online-toggle').check()));
   await a.waitForFunction(()=>{const t=document.querySelector('#online-users')?.innerText||'';return t.includes('Receiver B')&&t.includes('Receiver C');},null,{timeout:90000});
@@ -47,7 +50,7 @@ try{
   assert.equal(await b.locator('#incoming').isVisible(),false,'Switching to C must not lock B');
   assert.equal(await c.locator('#incoming').isVisible(),false,'Selecting C must not send hello before file selection');
 
-  await a.locator('#file-picker').setInputFiles({name:'first.bin',mimeType:'application/octet-stream',buffer:Buffer.alloc(512*1024,7)});
+  await chooseFile(a,'first.bin',512*1024,7);
   await c.locator('#incoming').waitFor({state:'visible',timeout:30000});
   assert.equal(await b.locator('#incoming').isVisible(),false,'Only selected receiver C should get the transfer offer');
   await c.locator('#decline').click();
@@ -55,7 +58,7 @@ try{
 
   await row(a,'Receiver B').getByRole('button',{name:'Connect'}).click();
   await a.waitForFunction(()=>document.querySelector('#target-name')?.textContent.includes('Receiver B'));
-  await a.locator('#file-picker').setInputFiles({name:'second.bin',mimeType:'application/octet-stream',buffer:Buffer.alloc(768*1024,9)});
+  await chooseFile(a,'second.bin',768*1024,9);
   await b.locator('#incoming').waitFor({state:'visible',timeout:30000});
   assert.equal(await c.locator('#incoming').isVisible(),false,'C must stay unlocked after its declined transfer');
   await b.locator('#accept').click();
