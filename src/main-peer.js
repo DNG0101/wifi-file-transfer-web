@@ -35,7 +35,7 @@ export class MainPeerManager{
     catch(e){this.leader=false;this.state('failed',e.message);decided();}
    }).catch(e=>{this.state('failed',e.message);decided();});
    await ready;
-   return shared.id||'';
+   return shared.id||this.id;
   }
   this.leader=true;return this.open();
  }

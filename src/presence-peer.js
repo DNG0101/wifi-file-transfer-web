@@ -24,7 +24,7 @@ export class PresencePeerManager{
  async tryLeadership(){if(this.lockPending||!this.enabled||this.leader)return;this.lockPending=true;let settled=false,decided;const ready=new Promise(r=>decided=()=>{if(!settled){settled=true;r();}});
   this.lockTask=this.locks.request('wft-presence-leader',{ifAvailable:true},async lock=>{this.lockPending=false;if(!this.enabled){decided();return;}if(!lock){this.state('standby','Peer 2 is active in another tab.');decided();return;}this.leader=true;try{await this.startNetwork();this.failureCount=0;this.retryAt=0;decided();await new Promise(r=>this.releaseLock=r);}catch(e){this.abortNetwork();this.starting=false;this.leader=false;this.failureCount=(this.failureCount||0)+1;this.retryAt=Date.now()+[5000,15000,30000,60000][Math.min(3,this.failureCount-1)];this.state('failed',e.message);decided();}}).catch(e=>{this.lockPending=false;this.state('failed',e.message);decided();});await ready;
  }
- abortNetwork(){clearInterval(this.timer);for(const timer of this.pending.values())clearTimeout(timer);this.pending.clear();for(const c of this.connections.values())c.close();this.connections.clear();this.peer?.destroy();this.peer=null;this.peer2Id='';}
+ abortNetwork(){clearInterval(this.timer);for(const pending of this.pending.values())clearTimeout(pending.timer);this.pending.clear();for(const c of this.connections.values())c.close();this.connections.clear();this.peer?.destroy();this.peer=null;this.peer2Id='';}
  async startNetwork(){
   if(!this.enabled||this.starting)return;this.starting=true;const slot=slotFor(this.uuid),slotId=this.prefix+slot;
   try{this.peer=await this.createPeer(slotId);this.isSlotLeader=true;}
@@ -42,29 +42,38 @@ export class PresencePeerManager{
  createPeer(id){return new Promise((resolve,reject)=>{const p=new this.PeerClass(id,this.options),timer=setTimeout(()=>{p.destroy();reject(Error('Peer 2 service did not respond.'));},20000);let done=false;p.on('open',()=>{if(done)return;done=true;clearTimeout(timer);resolve(p);});p.on('error',e=>{if(done)return;done=true;clearTimeout(timer);p.destroy();reject(e);});});}
  accept(conn){if(conn.metadata?.kind!=='presence-v1'||this.connections.size>=24){conn.on('open',()=>conn.close());return;}this.attach(conn);}
  attach(conn){
-  const id=conn.peer,old=this.connections.get(id);if(old&&old!==conn)old.close();
-  const pendingTimer=this.pending.get(id);if(pendingTimer){clearTimeout(pendingTimer);this.pending.delete(id);}
-  this.connections.set(id,conn);
-  conn.on('open',()=>{const timer=this.pending.get(id);if(timer){clearTimeout(timer);this.pending.delete(id);}void this.sendSummary(conn);});
-  conn.on('data',m=>void this.handleMessage(conn,m));
-  const clean=()=>{if(this.connections.get(id)===conn)this.connections.delete(id);const timer=this.pending.get(id);if(timer){clearTimeout(timer);this.pending.delete(id);}};
-  conn.on('close',clean);conn.on('error',clean);if(conn.open)void this.sendSummary(conn);
+  const id=conn.peer;
+  const promote=()=>{
+   const pending=this.pending.get(id);if(pending?.timer)clearTimeout(pending.timer);if(pending)this.pending.delete(id);
+   const old=this.connections.get(id);if(old&&old!==conn)old.close();this.connections.set(id,conn);void this.sendSummary(conn);
+  };
+  conn.on('open',promote);conn.on('data',m=>void this.handleMessage(conn,m));
+  const clean=()=>{if(this.connections.get(id)===conn)this.connections.delete(id);const pending=this.pending.get(id);if(pending?.conn===conn){clearTimeout(pending.timer);this.pending.delete(id);}};
+  conn.on('close',clean);conn.on('error',clean);if(conn.open)promote();
  }
  connect(id){
   if(!this.peer||!this.enabled||id===this.peer.id||this.connections.has(id)||this.pending.has(id))return;
   try{
    const conn=this.peer.connect(id,{reliable:true,serialization:'json',metadata:{kind:'presence-v1',uuid:this.uuid}});
-   const timer=setTimeout(()=>{this.pending.delete(id);if(!conn.open)conn.close();},CONNECT_TIMEOUT);this.pending.set(id,timer);this.attach(conn);
+   const timer=setTimeout(()=>{const pending=this.pending.get(id);if(pending?.conn===conn)this.pending.delete(id);if(!conn.open)conn.close();},CONNECT_TIMEOUT);
+   this.pending.set(id,{conn,timer});this.attach(conn);
   }catch{}
  }
  async ensureTopology(){
   if(!this.peer||!this.enabled)return;
-  // Every Peer 2 attempts every deterministic rendezvous slot. This removes the
-  // old directional topology where some join orders could take a long time to converge.
+  const assigned=this.prefix+slotFor(this.uuid);
+  if(!this.isSlotLeader){
+   if(this.connections.has(assigned)||this.pending.has(assigned))this.slotMisses=0;
+   else if(++this.slotMisses>=3){this.slotMisses=0;await this.restartNetwork();return;}
+  }
   for(let i=0;i<SLOTS;i++){const id=this.prefix+i;if(id!==this.peer.id)this.connect(id);}
-  // Also dial Peer 2 IDs learned from fresh presence rows. This turns rendezvous
-  // into bootstrap only; active users then synchronize directly when reachable.
   const rows=await this.db.online();for(const row of rows)if(row.uuid!==this.uuid&&row.peer2Id)this.connect(row.peer2Id);
+ }
+ async restartNetwork(){
+  if(this.restarting||!this.enabled||!this.leader)return;this.restarting=true;
+  clearInterval(this.timer);for(const pending of this.pending.values())clearTimeout(pending.timer);this.pending.clear();
+  for(const c of this.connections.values())c.close();this.connections.clear();this.peer?.destroy();this.peer=null;this.starting=false;
+  try{await this.startNetwork();}catch(e){this.state('failed',e.message);}finally{this.starting=false;this.restarting=false;}
  }
  envelope(type,payload){return {type,messageId:crypto.randomUUID(),originUuid:this.uuid,sentAt:Date.now(),payload};}
  send(conn,type,payload){if(!conn.open)return;const message=this.envelope(type,payload);if(JSON.stringify(message).length<=MAX_MESSAGE)conn.send(message);}
@@ -100,6 +109,6 @@ export class PresencePeerManager{
  async stopNow(){
   if(!this.enabled)return;this.enabled=false;clearInterval(this.timer);clearInterval(this.standbyTimer);await this.tickPromise?.catch(()=>{});
   if(this.leader&&this.peer){try{await this.refreshSelf(true,'offline');for(const c of this.connections.values())this.send(c,'SYNC_RECORDS',{records:[this.self]});}catch{}await new Promise(r=>setTimeout(r,100));}
-  for(const timer of this.pending.values())clearTimeout(timer);this.pending.clear();for(const c of this.connections.values())c.close();this.connections.clear();this.peer?.destroy();this.peer=null;this.peer2Id='';this.leader=false;this.releaseLock?.();this.releaseLock=null;this.channel?.close();this.channel=null;this.state('offline','Peer 2 stopped · online discovery disabled.');
+  for(const pending of this.pending.values())clearTimeout(pending.timer);this.pending.clear();for(const c of this.connections.values())c.close();this.connections.clear();this.peer?.destroy();this.peer=null;this.peer2Id='';this.leader=false;this.releaseLock?.();this.releaseLock=null;this.channel?.close();this.channel=null;this.state('offline','Peer 2 stopped · online discovery disabled.');
  }
 }
