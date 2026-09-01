@@ -23,7 +23,8 @@ jobs:
         run: |
           git config user.name "chatgpt-deep-fix"
           git config user.email "actions@users.noreply.github.com"
-          git add src/app.js src/main-peer.js tests/multi-online-browser.mjs
+          git add src/app.js src/main-peer.js src/presence-peer.js tests/multi-online-browser.mjs
           git diff --cached --check
           git commit -m "Fix multi receiver selection and UI lock state"
           git push
+# verification revision 2
