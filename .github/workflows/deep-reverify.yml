@@ -1,0 +1,29 @@
+name: Deep receiver regression
+on:
+  push:
+    paths:
+      - '.github/workflows/deep-reverify.yml'
+permissions:
+  contents: write
+jobs:
+  verify-and-patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: python3 scripts/deep_receiver_fix.py
+      - run: npm ci
+      - run: npm test
+      - run: npx playwright install --with-deps chromium
+      - run: node tests/multi-online-browser.mjs
+      - name: Commit verified receiver state fix
+        run: |
+          git config user.name "chatgpt-deep-fix"
+          git config user.email "actions@users.noreply.github.com"
+          git add src/app.js src/main-peer.js tests/multi-online-browser.mjs
+          git diff --cached --check
+          git commit -m "Fix multi receiver selection and UI lock state"
+          git push
