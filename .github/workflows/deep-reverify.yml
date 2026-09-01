@@ -17,7 +17,7 @@ jobs:
       - run: python3 scripts/deep_receiver_fix.py
       - run: npm ci
       - run: npm test
-      - run: timeout 210s node tests/multi-online-browser.mjs
+      - run: timeout 90s node tests/multi-online-browser.mjs
       - name: Commit verified receiver state fix
         run: |
           git config user.name "chatgpt-deep-fix"
@@ -26,4 +26,4 @@ jobs:
           git diff --cached --check
           git commit -m "Fix multi receiver selection and UI lock state"
           git push
-# verification revision 9 - Playwright file input mirrors real browser selection
+# verification revision 10 - bounded three-user state combinations
