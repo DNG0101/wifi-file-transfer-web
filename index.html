@@ -4,10 +4,13 @@
 <title>Wi-Fi File Transfer</title><meta name="description" content="Send files between your devices. Scan, accept, and transfer securely.">
 <meta name="theme-color" content="#061318"><link rel="icon" href="./favicon.svg"><link rel="manifest" href="./manifest.webmanifest">
 <link rel="stylesheet" href="./assets/app.css?v=4.2">
+<script>
+// Transfer diagnostics/history are session UI only. Never persist them in browser storage.
+try{localStorage.removeItem('wft-history-v2');const nativeSet=Storage.prototype.setItem;Storage.prototype.setItem=function(key,value){if(key==='wft-history-v2')return;return nativeSet.call(this,key,value);};}catch{}
+</script>
 <script type="importmap">
 {"imports":{"peerjs":"https://esm.sh/peerjs@1.5.5","qrcode-generator":"https://esm.sh/qrcode-generator@1.4.4","jsqr":"https://esm.sh/jsqr@1.4.0","@noble/hashes/sha256":"https://esm.sh/@noble/hashes@1.8.0/sha256","@noble/hashes/utils":"https://esm.sh/@noble/hashes@1.8.0/utils"}}
 </script>
-<script type="module" src="./src/main-peer-bootstrap.js?v=4.2"></script>
 <script type="module" src="./src/app.js?v=4.2"></script>
 </head><body><main>
 <header><a class="brand" href="./"><span class="brand-icon">⇄</span> File Transfer</a><span id="connection-state" class="badge">Your devices, connected</span></header>
@@ -17,8 +20,8 @@
 <button id="receive" class="mode" aria-pressed="false"><span class="mode-icon">↙</span><span><strong>Receive Files</strong><small>Show an invite and accept</small></span></button>
 </nav>
 <p id="status" class="status" role="status" aria-live="polite">Checking available devices. Choose Send Files or Receive Files to connect.</p>
-<section id="online-panel" class="panel online-panel"><div class="section-heading"><div><h2>Online discovery</h2><p id="online-state" class="muted">Offline · presence discovery disabled</p></div><label class="switch"><input id="online-toggle" type="checkbox" role="switch"><span>Online</span></label></div><p class="hint">Peer 1 is the main application peer and stays active while this page is running. Turning Online on starts Peer 2, which shares your name and Peer 1 ID with other active users. Turning Online off stops only Peer 2.</p><div id="online-users" class="online-users"><p class="muted">Turn Online on to see available users.</p></div></section>
-<section class="panel" id="discovery-panel"><h2>Available devices</h2><p id="discovery-status" role="status" class="muted">Checking your remembered devices…</p><div id="devices"></div><button id="refresh-devices" class="secondary">Check again</button><p class="hint">Online users appear from the Peer 2 presence directory. QR/code and remembered-device methods continue to work as alternatives.</p></section>
+<section id="online-panel" class="panel online-panel"><div class="section-heading"><div><h2>Online discovery</h2><p id="online-state" class="muted">Offline · Peer 2 disabled</p></div><label class="switch"><input id="online-toggle" type="checkbox" role="switch"><span>Online</span></label></div><p class="hint">Turning Online on starts only this user's Peer 2. Peer 2 shares the user's name and main Peer 1 ID with other active Peer 2 users. Turning Online off stops only Peer 2; Peer 1 remains available for the application's normal connection flow.</p><div id="online-users" class="online-users"><p class="muted">Turn Online on to see available users.</p></div></section>
+<section class="panel" id="discovery-panel"><h2>Available devices</h2><p id="discovery-status" role="status" class="muted">Checking your remembered devices…</p><div id="devices"></div><button id="refresh-devices" class="secondary">Check again</button><p class="hint">Online users come from Peer 2 synchronization. QR/code and remembered-device methods continue to work unchanged.</p></section>
 <section id="pairing-panel" class="panel" hidden>
 <h2><span class="step">1</span> Connect your devices</h2><p id="setup-hint" class="muted">Show your QR or scan the other device’s QR.</p>
 <button id="scan-qr" class="secondary">Scan QR code</button>
@@ -27,7 +30,7 @@
 <button id="create-room" class="secondary">New invitation</button>
 </section>
 <section id="receive-panel" class="panel" hidden>
-<h2>Save directly to your device</h2><button id="choose-folder" class="secondary">Choose device folder</button><p id="folder-status" class="muted">Choose a device folder before accepting files. File contents will be written there, not to browser storage. Downloads do not need a second Save step.</p><p id="direct-save-support" class="hint"></p>
+<h2>Save directly to your device</h2><button id="choose-folder" class="secondary">Choose download folder</button><p id="folder-status" class="muted">Choose the destination folder once. After you accept a transfer, verified file data is written automatically into that folder; there is no second Save/Download step.</p><p id="direct-save-support" class="hint"></p>
 </section>
 <section id="send-panel" class="panel" hidden>
 <h2><span class="step">2</span> Choose files and send</h2><p id="target-name" class="muted"></p>
@@ -39,12 +42,30 @@
 <section id="connected-panel" class="panel" hidden><h2>Connected devices</h2><div id="connected-devices"></div></section>
 <dialog id="scanner-dialog" aria-label="Scan invitation"><h2>Scan the other device’s QR</h2><video id="scanner-video" autoplay muted playsinline></video><p>Keep the other device’s QR page open and fit the whole square in view. Scan on one device only; allow camera permission when asked.</p><button id="stop-scan" class="secondary">Use code instead</button></dialog>
 <dialog id="incoming" class="request" aria-labelledby="request-title" aria-describedby="request-note"><p class="eyebrow">INCOMING TRANSFER</p><h2 id="request-title"></h2><pre id="request-files"></pre><p id="request-note" class="muted"></p><button id="request-folder" class="secondary" hidden>Choose destination folder</button><div class="request-actions"><button id="decline" class="secondary">Decline</button><button id="accept">Accept files</button></div></dialog>
-<div class="transfer-controls"><button id="pause" class="secondary" hidden>Pause</button><button id="resume" class="secondary" hidden>Resume</button><button id="cancel" class="danger" hidden>Cancel transfer</button><span id="active-summary" role="status"></span></div>
-<section id="received-section" class="panel received" hidden><h2>Received files</h2><p class="muted">New files are saved directly to your chosen device folder. Older browser-stored downloads can still be recovered below.</p><div id="downloads"></div><p id="download-memory" class="hint"></p></section>
+<div class="transfer-controls"><button id="pause" class="secondary" hidden>Pause</button><button id="resume" class="secondary" hidden>Resume</button><button id="cancel" class="danger" hidden>Cancel transfer</button><strong id="transfer-percent" aria-live="polite"></strong><span id="active-summary" role="status"></span></div>
+<section id="received-section" class="panel received" hidden><h2>Received files</h2><p class="muted">Verified files are saved automatically into the destination folder you approved.</p><div id="downloads"></div><p id="download-memory" class="hint"></p></section>
 <section id="recovery-section" class="panel" hidden><h2>Saved progress</h2><p class="muted">Reconnect the same devices. On the sender, reselect the original files to continue. On the receiver, allow folder access if requested.</p><div id="recoveries"></div><input id="resume-picker" type="file" multiple hidden><input id="resume-folder-picker" type="file" webkitdirectory multiple hidden></section>
-<details class="panel"><summary>Transfer history</summary><div id="history"></div><button id="clear-history" class="text-button">Clear history</button></details>
+<details class="panel"><summary>Transfer history (this session only)</summary><div id="history"></div><button id="clear-history" class="text-button">Clear history</button></details>
 <details class="panel"><summary>Settings &amp; your devices</summary><label for="device-name">This device’s name</label><input id="device-name" maxlength="48" autocomplete="off"><h3>Remembered devices</h3><div id="trusted-devices"></div><p class="hint">Remembering requires approval on both devices. Both must have this page open. Forgetting revokes this device’s private connection.</p><label><input id="keep-awake" type="checkbox" checked> Keep screen awake during transfers</label><p id="awake-status" class="hint">Keep both pages visible during transfer.</p></details>
-<details class="panel" id="diagnostics-panel" open><summary>Transfer diagnostics</summary><label><input id="debug-enabled" type="checkbox" checked> Show diagnostic events (no invitation secrets)</label><pre id="debug-log"></pre></details>
+<details class="panel" id="diagnostics-panel" hidden><summary>Transfer diagnostics</summary><label><input id="debug-enabled" type="checkbox"> Show diagnostic events</label><pre id="debug-log"></pre></details>
 <details class="panel troubleshooting"><summary>Help &amp; connection check</summary><p>Internet is needed to pair devices, even on the same Wi-Fi. Guest Wi-Fi, VPNs, blocked relays, and sleeping phones can interrupt transfers. Saved blocks let you retry without starting over.</p><button id="network-check" class="secondary">Check connection routes</button><p id="network-result" role="status" class="muted"></p><p>For a 10 GB receiver, desktop Chrome or Edge with a chosen folder is recommended. Browsers without device-folder access can send but cannot receive in direct-save mode. A phone’s background restrictions may stop transfers.</p></details>
-<footer><p>Version 4.2 · Peer 1 main connection + optional Peer 2 presence · Encrypted transfers · SHA-256 verified</p><details><summary>Privacy and browser limits</summary><p>GitHub Pages serves the app, never your file uploads. PeerJS handles signaling. Peer 1 is the main application/transfer peer and stays active while the page runs. Peer 2 exists only while Online is enabled and exchanges small presence records such as name, Peer 1 ID, heartbeat and version. STUN helps find direct routes; an operator-configured TURN relay may carry encrypted traffic.</p><p>Online presence exists only while Peer 2 is enabled and the page is running. Stale presence rows expire automatically. Device names are self-declared; verify who is sending before accepting.</p></details></footer>
-</main><noscript>Enable JavaScript to transfer files.</noscript></body></html>
+<footer><p>Version 4.2 · Peer 2 online directory · Encrypted transfers · SHA-256 verified</p><details><summary>Privacy and browser limits</summary><p>GitHub Pages serves the application and does not receive your file payload. Peer 1 handles the application's direct transfer connection. Peer 2 exists only while Online is enabled and exchanges small presence records such as UUID, name, Peer 1 ID, heartbeat and version.</p><p>Browsers require the receiver to grant permission to a destination folder or download action; after that permission and transfer acceptance, the application saves verified data automatically. Transfer diagnostics/history are not persisted by this page.</p></details></footer>
+</main><noscript>Enable JavaScript to transfer files.</noscript>
+<script>
+// Add a clear numeric percentage without changing the proven transfer engine.
+(function(){
+ const percent=document.getElementById('transfer-percent');
+ function update(){
+  let best=null;
+  for(const p of document.querySelectorAll('#history progress')){
+   const value=Number(p.value),max=Number(p.max)||100;if(!Number.isFinite(value))continue;
+   const pc=Math.max(0,Math.min(100,Math.round(value/max*100)));if(best===null||pc>best)best=pc;
+  }
+  const summary=document.getElementById('active-summary')?.textContent||'';
+  percent.textContent=summary&&best!==null?`${best}%`:'';
+ }
+ new MutationObserver(update).observe(document.body,{subtree:true,childList:true,characterData:true,attributes:true,attributeFilter:['value']});
+ setInterval(update,250);update();
+})();
+</script>
+</body></html>
