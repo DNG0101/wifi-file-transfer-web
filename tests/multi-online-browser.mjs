@@ -17,7 +17,7 @@ const server=createServer(async(req,res)=>{try{
 }catch{res.statusCode=404;res.end();}});
 await new Promise(r=>server.listen(0,'127.0.0.1',r));
 const url=`http://127.0.0.1:${server.address().port}/wifi-file-transfer-web/`;
-const browser=await chromium.launch({headless:true});
+const browser=await chromium.launch({channel:'chrome',headless:true});
 const errors=[];
 let a,b,c;
 try{
