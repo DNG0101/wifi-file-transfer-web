@@ -33,7 +33,7 @@ try{
  a=await ctxA.newPage();b=await ctxB.newPage();c=await ctxC.newPage();
  for(const p of [a,b,c]){p.on('pageerror',e=>errors.push(e.message));p.on('console',m=>{if(m.type()==='error')errors.push('console: '+m.text());});p.on('download',d=>void d.cancel().catch(()=>{}));await p.goto(url,{waitUntil:'domcontentloaded'});}
  const setName=(p,name)=>p.evaluate(name=>{const e=document.querySelector('#device-name');e.value=name;e.dispatchEvent(new Event('change',{bubbles:true}));},name);
- const chooseFile=async(p,name,size,value)=>{assert.equal(await p.locator('#file-picker').isDisabled(),false,`file picker must be enabled after selecting ${name}`);await p.evaluate(({name,size,value})=>{const input=document.querySelector('#file-picker'),dt=new DataTransfer();dt.items.add(new File([new Uint8Array(size).fill(value)],name,{type:'application/octet-stream'}));input.files=dt.files;input.dispatchEvent(new Event('change',{bubbles:true}));},{name,size,value});};
+ const chooseFile=async(p,name,size,value)=>{const picker=p.locator('#file-picker');assert.equal(await picker.isDisabled(),false,`file picker must be enabled after selecting ${name}`);await picker.setInputFiles({name,mimeType:'application/octet-stream',buffer:Buffer.alloc(size,value)});};
  await setName(a,'Sender A');await setName(b,'Receiver B');await setName(c,'Receiver C');
  await Promise.all([a,b,c].map(p=>p.locator('#online-toggle').check()));
  diagTimer=setInterval(()=>void dump('PEER2 PERIODIC'),15000);
