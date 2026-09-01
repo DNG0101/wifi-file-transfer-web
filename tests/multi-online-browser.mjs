@@ -20,6 +20,20 @@ const url=`http://127.0.0.1:${server.address().port}/wifi-file-transfer-web/`;
 const browser=await chromium.launch({channel:'chrome',headless:true});
 const errors=[];
 let a,b,c,ctxA,ctxB,ctxC;
+const snapshot=async(p)=>p?.evaluate(async()=>{
+  const databases=await indexedDB.databases?.().catch(()=>[])||[];
+  return {
+    name:document.querySelector('#device-name')?.value,
+    uuid:localStorage.getItem('app_device_uuid')||localStorage.getItem('wft-device-id'),
+    onlineChecked:document.querySelector('#online-toggle')?.checked,
+    onlineState:document.querySelector('#online-state')?.textContent,
+    onlineUsers:document.querySelector('#online-users')?.innerText,
+    status:document.querySelector('#status')?.textContent,
+    debug:document.querySelector('#debug-log')?.textContent,
+    databases:databases.map(x=>x.name),
+    localStorage:Object.fromEntries(Object.entries(localStorage))
+  };
+}).catch(e=>({snapshotError:e.message}));
 try{
   ctxA=await browser.newContext({acceptDownloads:true});
   ctxB=await browser.newContext({acceptDownloads:true});
@@ -27,6 +41,7 @@ try{
   a=await ctxA.newPage();b=await ctxB.newPage();c=await ctxC.newPage();
   for(const p of [a,b,c]){
     p.on('pageerror',e=>errors.push(e.message));
+    p.on('console',m=>{if(m.type()==='error')errors.push('console: '+m.text());});
     p.on('download',d=>void d.cancel().catch(()=>{}));
     await p.goto(url,{waitUntil:'domcontentloaded'});
   }
@@ -70,6 +85,9 @@ try{
   assert.equal(await row(a,'Receiver C').getByRole('button',{name:'Connect'}).isDisabled(),false);
   assert.deepEqual(errors,[]);
   console.log('PASS: isolated multi-user receivers remain selectable before transfer, after decline, and after success; only file selection opens file-v3.');
+}catch(e){
+  console.error('MULTI USER DIAGNOSTICS',JSON.stringify({errors,A:await snapshot(a),B:await snapshot(b),C:await snapshot(c)},null,2));
+  throw e;
 }finally{
   await Promise.all([ctxA,ctxB,ctxC].filter(Boolean).map(ctx=>ctx.close().catch(()=>{})));
   await browser.close();server.close();
