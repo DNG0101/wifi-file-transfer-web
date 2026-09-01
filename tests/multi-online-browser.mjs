@@ -19,15 +19,20 @@ await new Promise(r=>server.listen(0,'127.0.0.1',r));
 const url=`http://127.0.0.1:${server.address().port}/wifi-file-transfer-web/`;
 const browser=await chromium.launch({channel:'chrome',headless:true});
 const errors=[];
-let a,b,c;
+let a,b,c,ctxA,ctxB,ctxC;
 try{
-  a=await browser.newPage();b=await browser.newPage();c=await browser.newPage();
+  // Separate contexts simulate three real users: distinct localStorage, UUID,
+  // IndexedDB, OPFS and Web Locks.
+  ctxA=await browser.newContext({acceptDownloads:true});
+  ctxB=await browser.newContext({acceptDownloads:true});
+  ctxC=await browser.newContext({acceptDownloads:true});
+  a=await ctxA.newPage();b=await ctxB.newPage();c=await ctxC.newPage();
   for(const p of [a,b,c]){
     p.on('pageerror',e=>errors.push(e.message));
     p.on('download',d=>void d.cancel().catch(()=>{}));
     await p.goto(url,{waitUntil:'domcontentloaded'});
   }
-  const setName=async(p,name)=>{await p.locator('#device-name').fill(name);await p.locator('#device-name').evaluate(e=>e.dispatchEvent(new Event('change',{bubbles:true})));};
+  const setName=async(p,name)=>p.evaluate(name=>{const e=document.querySelector('#device-name');e.value=name;e.dispatchEvent(new Event('change',{bubbles:true}));},name);
   await setName(a,'Sender A');await setName(b,'Receiver B');await setName(c,'Receiver C');
   await Promise.all([a,b,c].map(p=>p.locator('#online-toggle').check()));
   await a.waitForFunction(()=>{const t=document.querySelector('#online-users')?.innerText||'';return t.includes('Receiver B')&&t.includes('Receiver C');},null,{timeout:90000});
@@ -61,7 +66,8 @@ try{
   assert.equal(await row(a,'Receiver B').getByRole('button',{name:'Connect'}).isDisabled(),false);
   assert.equal(await row(a,'Receiver C').getByRole('button',{name:'Connect'}).isDisabled(),false);
   assert.deepEqual(errors,[]);
-  console.log('PASS: multiple online receivers remain selectable before a transfer, after decline, and after successful completion; only file selection opens file-v3.');
+  console.log('PASS: isolated multi-user receivers remain selectable before transfer, after decline, and after success; only file selection opens file-v3.');
 }finally{
+  await Promise.all([ctxA,ctxB,ctxC].filter(Boolean).map(ctx=>ctx.close().catch(()=>{})));
   await browser.close();server.close();
 }
