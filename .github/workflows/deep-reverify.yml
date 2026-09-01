@@ -26,4 +26,4 @@ jobs:
           git diff --cached --check
           git commit -m "Fix multi receiver selection and UI lock state"
           git push
-# verification revision 3
+# verification revision 4 - isolated browser contexts
