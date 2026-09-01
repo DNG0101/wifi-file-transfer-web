@@ -4,6 +4,7 @@ import {records,BlockStorage} from './storage.js';
 import {TrustedDevices,identity,friendlyName} from './devices.js';
 import {Scanner} from './qr.js';
 import {readInvitation,invitationUrl} from './invitation.js';
+import {PresencePeerManager} from './presence-peer.js';
 import {configureNetwork} from './network.js';
 import qrcode from 'qrcode-generator';
 
@@ -12,7 +13,7 @@ const fmt = n => n<1024?`${n} B`:n<1048576?`${(n/1024).toFixed(1)} KB`:n<1073741
 let room, mode=null, files=[], members=[], active, directory,trust,resumeRecord;
 let selectedMember,preparedConnection,preparingDevice=false,prepareGeneration=0;
 const pendingReceivers=new Map();
-const deviceId=identity();let reconnectTimer,reconnectAttempts=0;
+const deviceId=identity();let reconnectTimer,reconnectAttempts=0,presence;
 let connecting=false, attempt=0, lastAttempt, wakeLock, acquiringWake=false;
 const downloads=[], cards=new Map();
 let history=[];
@@ -25,6 +26,17 @@ for(const row of history) if(!['complete','failed','declined','cancelled'].inclu
 }
 function notice(text,error=false) { $('status').textContent=text; $('status').className=error?'status error':'status'; }
 function debug(text){if(!$('debug-enabled').checked)return;const log=$('debug-log');log.textContent=(log.textContent+'\n'+new Date().toLocaleTimeString()+' '+text).split('\n').slice(-100).join('\n');}
+function renderOnlineUsers(users=[]){
+ $('online-users').replaceChildren();const distinct=users.filter((u,i)=>users.findIndex(x=>x.uuid===u.uuid)===i);
+ if(!distinct.length){$('online-users').append(el('p',$('online-toggle').checked?'No other online users found yet. Keep this page open.':'Turn Online on to see available users.','muted'));return;}
+ for(const user of distinct){const row=el('div',undefined,'online-user');row.append(el('span',user.name),el('small',user.uuid===deviceId?'This device':'Online'));$('online-users').append(row);}
+}
+function presenceState(state,detail){$('online-state').textContent=detail||state;debug('Online presence: '+state);}
+async function setOnline(enabled){
+ $('online-toggle').checked=enabled;try{localStorage.setItem('wft-online-enabled',enabled?'1':'0');}catch{}
+ if(enabled){try{await networkReady;if(!presence)presence=new PresencePeerManager({uuid:deviceId,name:$('device-name').value,peer1Id:room?.id||'',onChange:renderOnlineUsers,onState:presenceState});await presence.start();}catch(e){presenceState('failed',e.message);}}
+ else {await presence?.stop();renderOnlineUsers([]);}
+}
 const networkReady=configureNetwork().catch(e=>debug(e.message));
 function save() { try {localStorage.setItem('wft-history-v2',JSON.stringify(history.slice(0,50)));} catch {} }
 function el(tag,text,className) {const e=document.createElement(tag);if(text!==undefined)e.textContent=text;if(className)e.className=className;return e;}
@@ -203,7 +215,7 @@ async function openRoom(host,codeOverride,collisions=0) {
     if(token!==attempt)return;
     await candidate.open(code,host,$('device-name').value.trim()||'My device',mode);
     if(token!==attempt)return;
-    $('room-code').value=code;$('room-info').hidden=false;renderInvite();
+    $('room-code').value=code;$('room-info').hidden=false;renderInvite();void presence?.setIdentity({peer1Id:candidate.id}).catch(e=>debug(e.message));
     notice(active?.state==='reconnecting'?'Reconnected. Tap Resume to continue your saved transfer.':members.length?'Devices paired. On the sender, choose the receiver to enable file selection.':mode==='receive'?'Ready. Scan this invitation on the sending device.':'Ready. Scan the other device’s QR, or let it scan yours.');
   } catch(e) {
     if(token!==attempt)return;
@@ -216,6 +228,7 @@ function leaveRoom() {
   if(busy()){notice('Finish or cancel the file transfer before leaving.',true);return;}
   attempt++;resetPrepared();room?.close();room=null;members=[];connecting=false;
   $('room-info').hidden=true;roomState('closed');controls();notice('Disconnected. Receive Files creates a new invitation.');
+  void presence?.setIdentity({peer1Id:''}).catch(e=>debug(e.message));
 }
 function renderTrusted(){
   $('trusted-devices').replaceChildren();
@@ -299,14 +312,17 @@ $('network-check').onclick=async()=>{
   finally{$('network-check').disabled=false;}
 };
 try {$('device-name').value=localStorage.getItem('wft-device-name')||friendlyName();}catch{$('device-name').value=friendlyName();}
-$('device-name').onchange=()=>{const name=$('device-name').value.trim().slice(0,48)||friendlyName();$('device-name').value=name;try{localStorage.setItem('wft-device-name',name);}catch{}if(room){room.name=name;room.setMode(mode);}if(trust){trust.name=name;for(const {room:r} of trust.rooms.values()){r.name=name;r.setMode(mode||'send');}}};
+$('device-name').onchange=()=>{const name=$('device-name').value.trim().slice(0,48)||friendlyName();$('device-name').value=name;try{localStorage.setItem('wft-device-name',name);}catch{}if(room){room.name=name;room.setMode(mode);}if(trust){trust.name=name;for(const {room:r} of trust.rooms.values()){r.name=name;r.setMode(mode||'send');}}void presence?.setIdentity({name}).catch(e=>debug(e.message));};
 trust=new TrustedDevices({id:deviceId,name:$('device-name').value,mode:'send',onChange:()=>{renderDevices();renderTrusted();},onTransfer:awaitTransfer});
 debug('Startup: checking private remembered-device connections.');
 void networkReady.then(()=>trust.load()).then(()=>{if(!mode)notice('Choose Send Files or Receive Files. Remembered devices appear automatically when online.');}).catch(()=>notice('Recovery metadata storage is unavailable. Enable site storage to transfer files.',true));
 function consumeInvitation(){const params=new URLSearchParams(location.hash.slice(1));if(!(params.get('join')||params.get('room')))return;const value=location.href;window.history.replaceState(null,'',location.pathname+location.search);joinInvitation(value,true);}
 $('refresh-devices').onclick=async()=>{$('refresh-devices').disabled=true;debug('Checking remembered devices again.');try{await networkReady;await trust.load();renderDevices();}catch(e){notice(e.message,true);}finally{$('refresh-devices').disabled=false;}};
 consumeInvitation();window.addEventListener('hashchange',consumeInvitation);
+$('online-toggle').onchange=()=>void setOnline($('online-toggle').checked);
+window.addEventListener('storage',e=>{if(e.key==='wft-online-enabled')void setOnline(e.newValue==='1');});
 window.addEventListener('beforeunload',event=>{if(busy()){event.preventDefault();event.returnValue='';}});
+window.addEventListener('pagehide',()=>void presence?.stop());
 window.addEventListener('offline',()=>notice('Internet connection lost. Existing transfers may continue; new pairing needs internet.',true));
 window.addEventListener('online',()=>{if(!busy())notice('Internet is back. Use Retry connection if your room is disconnected.');});
 document.addEventListener('visibilitychange',()=>{void maintainWakeLock();});
@@ -315,4 +331,5 @@ if(!window.isSecureContext||!window.RTCPeerConnection) {
   $('create-room').disabled=$('join-room').disabled=true;
 }
 if('serviceWorker' in navigator)navigator.serviceWorker.register('./sw.js').catch(()=>{});
-drawHistory();renderDevices();void renderRecovery();setInterval(()=>{if(room)renderInvite();},30000);
+drawHistory();renderDevices();renderOnlineUsers();void renderRecovery();setInterval(()=>{if(room)renderInvite();},30000);
+try{if(localStorage.getItem('wft-online-enabled')==='1')void setOnline(true);}catch{}

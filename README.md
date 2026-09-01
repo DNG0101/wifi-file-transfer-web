@@ -79,3 +79,11 @@ The original static application remains at `legacy.html` for reference. Version 
 Open this site on both devices. Choose Send on one and Receive on the other. Keep one QR visible and scan it with the other device’s in-app scanner; scanning both ways is unnecessary. Allow camera permission and fit the whole QR in view. You can also paste the invitation link or code. If an invitation expired, its creator should choose New invitation. Keep both pages open during pairing.
 
 QR regressions: npm run test:qr exercises actual QR decoding from synthetic camera video and real browser pairing. It does not substitute for physical phone camera tests.
+
+## Optional Online discovery
+
+Turn **Online** on to advertise a small presence record while this page is running and list other active installations. This creates a separate presence-only Peer 2. QR codes, connection codes, transfer approval, direct folder saving, and all file bytes continue through the existing Peer 1 flow.
+
+Presence records live in IndexedDB and synchronize through browser peers every 20 seconds. They contain a persistent installation UUID, display name, current peer IDs, revision, heartbeat sequence, and timestamps. They do not contain files. Records older than five minutes are deleted and rejected if another peer later sends the stale copy.
+
+The online list is not a transfer authorization mechanism. Use the existing QR or code to connect before choosing files. Online discovery works only while participating pages are running; GitHub Pages does not keep browser peers alive after a browser or device closes. It still relies on PeerJS signaling and WebRTC reachability. A configured TURN service may be needed on restrictive networks.

@@ -22,3 +22,6 @@
 | TURN | Retired PeerJS relay removed; optional HTTPS temporary-credential endpoint |
 | APK interoperability / unrestricted LAN scan | Not supported; browser limitations documented |
 | Concurrent transfers | One active batch per tab; no automatic multi-peer queue |
+
+| Optional online presence | Yes | Separate Peer 2, IndexedDB rows, 20-second heartbeat, four browser-hosted rendezvous slots, Web Locks tab leader |
+| Stale presence protection | Yes | Five-minute expiry plus inbound age rejection; returning UUID advances revision |

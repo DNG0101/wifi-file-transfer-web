@@ -1,6 +1,16 @@
 import {Room} from './room.js';
 import {deviceRecords} from './storage.js';
-export function identity(){let id;try{id=localStorage.getItem('wft-device-id');if(!/^[0-9a-f-]{36}$/.test(id||'')){id=crypto.randomUUID();localStorage.setItem('wft-device-id',id);}}catch{id=crypto.randomUUID();}return id;}
+const UUID=/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+export function identity(){
+ let id;try{
+  const candidates=[];
+  for(const key of ['wft-device-id','app_device_uuid']){const value=localStorage.getItem(key);if(UUID.test(value||''))candidates.push({id:value,version:Number(localStorage.getItem(key+'-version'))||0,updatedAt:Number(localStorage.getItem(key+'-updated'))||0});}
+  try{const legacy=JSON.parse(localStorage.getItem('wft-identity-candidates')||'[]');if(Array.isArray(legacy))for(const row of legacy)if(UUID.test(row?.id||''))candidates.push({id:row.id,version:Number(row.version)||0,updatedAt:Number(row.updatedAt)||0});}catch{}
+  candidates.sort((a,b)=>b.version-a.version||b.updatedAt-a.updatedAt||a.id.localeCompare(b.id));id=candidates[0]?.id||crypto.randomUUID();
+  const version=candidates[0]?.version||1,updatedAt=candidates[0]?.updatedAt||Date.now();
+  localStorage.setItem('wft-device-id',id);localStorage.setItem('app_device_uuid',id);localStorage.setItem('wft-device-id-version',String(version));localStorage.setItem('wft-device-id-updated',String(updatedAt));localStorage.removeItem('wft-identity-candidates');
+ }catch{id=crypto.randomUUID();}return id;
+}
 export function friendlyName(ua=navigator.userAgent){const browser=/Edg\//.test(ua)?'Edge':/Firefox\//.test(ua)?'Firefox':/Chrome|CriOS/.test(ua)?'Chrome':'Safari';const os=/iPhone/.test(ua)?'iPhone':/iPad/.test(ua)?'iPad':/Android/.test(ua)?'Android':/Windows/.test(ua)?'Windows':/Mac/.test(ua)?'Mac':'Linux';return `${browser} on ${os}`;}
 export class TrustedDevices {
  constructor({id,name,mode,onChange,onTransfer,onError}){Object.assign(this,{id,name,mode,onChange,onTransfer,onError});this.rooms=new Map();this.contacts=[];this.timer=setInterval(()=>void this.refresh(),30000);}

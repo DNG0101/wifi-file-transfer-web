@@ -1,3 +1,12 @@
+## Version 4.0 online presence validation
+
+- 52 automated tests pass, including all prior QR/code, consent, block transfer, recovery, direct-folder output, backpressure, integrity, and 10 GB metadata tests.
+- Three in-memory Peer 2 nodes converge, propagate name/Peer 1 ID changes, reject malformed/oversized messages, avoid duplicate timers, publish offline, and re-elect a missing rendezvous holder.
+- Three isolated Chrome contexts converge through real PeerJS/WebRTC into distinct IndexedDB rows.
+- Browser tests verify UUID persistence after reload, presence store indexes, stale resurrection rejection, a returning UUID, one leader for shared-origin tabs, and standby takeover after leader closure.
+- The existing UI integration suite still transfers binary and empty files byte-for-byte after QR/code pairing and writes no received payload blocks to IndexedDB.
+- Hardware/router limitations remain: the tests cannot prove every NAT path, mobile background timer behavior, camera autofocus, or an unconfigured TURN route.
+
 ## Version 3.2 QR pairing fixes
 
 - QR scanning, pasted invites, and shared links use the same validated parser. The directory and index.html forms of the same Pages app are accepted; unrelated origins and paths are rejected.
@@ -78,3 +87,4 @@ node tests/large-browser.mjs
 ```
 
 Browser tests require installed Chrome and internet. Large-test artifacts are ignored under test-results/. Allow at least 40 GB free; never run concurrent large tests against that shared fixture path. TEST_BYTES selects a smaller size. RELAY_ONLY=1 forces relay-only ICE for the network suite and is expected to fail until a working relay is supplied to its test configuration.
+
