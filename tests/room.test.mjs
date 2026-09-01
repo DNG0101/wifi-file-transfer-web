@@ -63,3 +63,11 @@ test('unavailable QR creator rejects the join immediately instead of waiting for
  room.peer.emit('error',{type:'peer-unavailable'});
  await failure;room.close();
 });
+
+test('connected room peers can receive file channels regardless of their current UI mode',async()=>{
+  let transfers=0;const room=new Room({onTransfer:()=>transfers++},{PeerClass:FakePeer});
+  const opening=room.open('abcdefgh2345',true,'Host','send');room.peer.emit('open');await opening;
+  room.members.set('guest',{id:'guest',name:'Guest',mode:'receive',deviceId:'guest-device'});
+  const incoming=new FakeConn('guest');incoming.metadata={kind:'file-v3',transferId:crypto.randomUUID()};room.incoming(incoming);
+  assert.equal(room.mode,'send');assert.equal(transfers,1,'Send-mode peer must still accept an incoming transfer offer from a connected member');room.close();
+});

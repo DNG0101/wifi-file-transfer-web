@@ -21,7 +21,16 @@ try{
   assert.equal(await a.evaluate(()=>transfer.state),'complete');
   await b.waitForFunction(()=>received.length===2);
   const received=await b.evaluate(()=>received);assert.equal(received[0].bytes.length,2*1024*1024+19);assert.ok(received[0].bytes.every((b,i)=>b===i%251));assert.equal(received[1].bytes.length,0);
-  console.log('PASS: two real Chromium peers joined through PeerJS Cloud, discovered receiver, waited for consent, and transferred binary + empty files over WebRTC.');
+  console.log('PASS: A → B transfer completed with receiver consent.');
+  // Reverse direction on the same established room without changing modes:
+  // A is still mode=send and B is still mode=receive. Connected peers must be bidirectional.
+  await a.evaluate(()=>{room.cb.onTransfer=conn=>{window.reverseReceived=[];window.reverseTransfer=new testApi.Transfer(conn,{onOffer:()=>window.reverseOffered=true,onFile:async f=>window.reverseReceived.push({name:f.name,bytes:Array.from(new Uint8Array(await f.blob.arrayBuffer()))})});};});
+  await b.evaluate(()=>{window.reverseSender=new testApi.Transfer(room.connect(members[0].id),{files:[new File([Uint8Array.from([9,8,7,6,5])],'reverse.bin')]});});
+  await a.waitForFunction(()=>window.reverseOffered,{timeout:30000});
+  await a.evaluate(()=>reverseTransfer.accept(()=>testApi.memorySink()));
+  await b.waitForFunction(()=>reverseSender.terminal(),{timeout:30000});assert.equal(await b.evaluate(()=>reverseSender.state),'complete');
+  await a.waitForFunction(()=>reverseReceived?.length===1,{timeout:30000});assert.deepEqual(await a.evaluate(()=>reverseReceived[0].bytes),[9,8,7,6,5]);
+  console.log('PASS: B → A reverse transfer completed on the same connection state while A remained Send mode and B remained Receive mode.');
   if(process.env.RELAY_ONLY==='1')console.log('PASS: both peers forced to relay-only ICE; transfer required TURN.');
   await b.evaluate(()=>room.close());await a.waitForFunction(()=>members.length===0);console.log('PASS: disconnected receiver removed from room.');
 }finally{await browser.close();server.close();}

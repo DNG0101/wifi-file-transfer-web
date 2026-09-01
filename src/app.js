@@ -79,7 +79,7 @@ function setMode(next) {
   if(next!=='send')resetPrepared();
   for(const name of ['send','receive']) {$(name).classList.toggle('selected',mode===name);$(name).setAttribute('aria-pressed',mode===name);}
   $('pairing-panel').hidden=!mode;$('receive-panel').hidden=mode!=='receive';
-  $('setup-hint').textContent='Scan once on either device; leave the other device’s QR open. Online users can also connect directly using Peer 1.';
+  $('setup-hint').textContent='After devices connect, either device can initiate the next file transfer. Every incoming transfer still requires receiver approval.';
   renderDevices();renderInvite();
 }
 function renderDevices() {
@@ -87,16 +87,16 @@ function renderDevices() {
   const available=allMembers();
   const checking=[...(trust?.rooms.values()||[])].some(entry=>['connecting','reconnecting'].includes(entry.room.state));
   $('discovery-status').textContent=available.length?`${available.length} available device${available.length===1?'':'s'} found. Choose a receiver before selecting files.`:checking?'Checking your remembered devices…':'No devices available yet. Use Online discovery, scan a QR, or enter a connection code.';
-  if(selectedMember&&!busy()&&!available.some(m=>m.deviceId===selectedMember.deviceId&&m.mode==='receive'))resetPrepared();
+  if(selectedMember&&!busy()&&!available.some(m=>m.deviceId===selectedMember.deviceId))resetPrepared();
   const ready=mode==='send'&&!!selectedMember&&!busy();
   $('send-panel').hidden=!ready&&!busy();
   if(mode!=='send')$('send-panel').hidden=true;
   $('file-picker').disabled=$('folder-picker').disabled=!ready||!!busy();
   $('target-name').textContent=selectedMember?`Connected to ${selectedMember.name}. Select files to request transfer immediately.`:'Connect to a receiver first.';
   for(const m of available) {
-    const receive=m.mode==='receive'; const b=el('button',undefined,'device');
-    b.append(el('span','▣','device-icon'),el('strong',m.name),el('span',!receive?'Sender · choose Receive on this device to get files':selectedMember?.deviceId===m.deviceId&&ready?'Selected · choose files below':m.onlineDirectory?'Online · select this Peer 1 →':'Select this receiver →','muted'));
-    b.disabled=!receive||!!busy();b.onclick=()=>prepareReceiver(m);$('devices').append(b);
+    const b=el('button',undefined,'device');
+    b.append(el('span','▣','device-icon'),el('strong',m.name),el('span',selectedMember?.deviceId===m.deviceId&&ready?'Selected · choose files below':m.onlineDirectory?'Online · can send or receive →':'Connected · can send or receive →','muted'));
+    b.disabled=!!busy();b.onclick=()=>prepareReceiver(m);$('devices').append(b);
   }
   $('connected-panel').hidden=!available.length;$('connected-devices').replaceChildren();
   for(const m of available){const row=el('div',undefined,'download');row.append(el('span',m.name+(m.trusted?' · Remembered':m.onlineDirectory?' · Online directory':'')));if(!m.onlineDirectory&&!m.trusted&&!trust?.contacts.some(c=>c.id===m.deviceId)){const remember=el('button','Remember device','secondary');remember.onclick=async()=>{remember.disabled=true;try{await trust.remember(m);notice('Device remembered. Next time, open this page on both devices.');}catch(e){notice(e.message,true);}finally{remember.disabled=false;}};row.append(remember);}$('connected-devices').append(row);}
@@ -198,14 +198,14 @@ function startSend(member,record) {
 function resetPrepared(){selectedMember=null;}
 function prepareReceiver(member){
   if(busy()){notice('A transfer is already active. Finish or cancel it before selecting another receiver.',true);return;}
-  if(!member||member.mode!=='receive'){notice('That device is not available to receive files.',true);return;}
+  if(!member){notice('That connected device is unavailable.',true);return;}
   if(mode!=='send')setMode('send');
   selectedMember=member;debug(member.onlineDirectory?'Selected current Peer 1 from online directory.':'Selected available receiver.');notice(`Selected ${member.name}. Choose files to start the transfer.`);renderDevices();$('send-panel').scrollIntoView({behavior:'smooth',block:'center'});
 }
 function awaitTransfer(conn,member){
   incoming(conn,member);
 }
-function scheduleReconnect(t,member){if(t!==active||t.terminal()||t.direction!=='send')return;clearTimeout(reconnectTimer);if(reconnectAttempts>=4){notice('Automatic retries stopped. Keep both pages open, reconnect if needed, then tap Resume.',true);return;}reconnectTimer=setTimeout(()=>{if(t!==active||t.terminal())return;reconnectAttempts++;const current=allMembers().find(m=>m.deviceId===member.deviceId&&m.mode==='receive');try{if(!current)throw Error('Receiver offline');debug('Reconnection attempt '+reconnectAttempts);t.attach(current.room.connect(current.id,t.id));setTimeout(()=>{if(t===active&&t.state==='connecting'){t.interrupted('Connection retry timed out.');}},25000);}catch{scheduleReconnect(t,member);}},[1000,3000,8000,15000][reconnectAttempts]);}
+function scheduleReconnect(t,member){if(t!==active||t.terminal()||t.direction!=='send')return;clearTimeout(reconnectTimer);if(reconnectAttempts>=4){notice('Automatic retries stopped. Keep both pages open, reconnect if needed, then tap Resume.',true);return;}reconnectTimer=setTimeout(()=>{if(t!==active||t.terminal())return;reconnectAttempts++;const current=allMembers().find(m=>m.deviceId===member.deviceId);try{if(!current)throw Error('Receiver offline');debug('Reconnection attempt '+reconnectAttempts);t.attach(current.room.connect(current.id,t.id));setTimeout(()=>{if(t===active&&t.state==='connecting'){t.interrupted('Connection retry timed out.');}},25000);}catch{scheduleReconnect(t,member);}},[1000,3000,8000,15000][reconnectAttempts]);}
 function incoming(conn,m){if(busy()){const senderId=active?.record?.senderId||active?.options?.senderId;if(active?.direction==='receive'&&conn.metadata?.transferId===active.id&&m.deviceId===senderId){active.attach(conn);return;}if(conn.open)conn.close();else conn.on('open',()=>conn.close());return;}if(conn.metadata?.kind!=='file-v3'){conn.close();return;}track(conn,m,false);}
 async function openRoom(host,codeOverride,collisions=0) {
   if(busy()&&active.state!=='reconnecting')return;
@@ -249,7 +249,7 @@ async function renderRecovery(){
   const saved=list.filter(r=>!['cancelled','declined'].includes(r.state)&&!(r.direction==='send'&&r.state==='complete'));
   $('recovery-section').hidden=!saved.length;
   for(const record of saved){const row=el('article',undefined,'history-card');row.append(el('strong',record.manifest.map(f=>f.name).join(', ')),el('p',`${record.direction==='send'?'Sending':'Receiving'} · ${record.state==='complete'?'Verified files saved': 'Verified blocks preserved'}`,'muted'));
-    if(record.direction==='send'){const resume=el('button','Reselect files & resume','secondary');resume.onclick=()=>{if(busy()){notice('Finish or cancel the active transfer first.',true);return;}const peer=allMembers().find(m=>m.deviceId===record.receiverId&&m.mode==='receive');if(!peer){notice('Reconnect the original receiver first, using Online discovery, its invitation, or remembered device.',true);return;}resumeRecord=record;const folder=record.manifest.some(f=>f.path.includes('/'));$(folder?'resume-folder-picker':'resume-picker').click();};row.append(resume);}
+    if(record.direction==='send'){const resume=el('button','Reselect files & resume','secondary');resume.onclick=()=>{if(busy()){notice('Finish or cancel the active transfer first.',true);return;}const peer=allMembers().find(m=>m.deviceId===record.receiverId);if(!peer){notice('Reconnect the original receiver first, using Online discovery, its invitation, or remembered device.',true);return;}resumeRecord=record;const folder=record.manifest.some(f=>f.path.includes('/'));$(folder?'resume-folder-picker':'resume-picker').click();};row.append(resume);}
     else {
       if(record.storage==='directory'){const allow=el('button','Allow destination access','secondary');allow.onclick=async()=>{try{if(await record.directory.requestPermission({mode:'readwrite'})!=='granted')throw Error('Folder permission was not granted.');notice('Folder ready. Resume from the sender.');}catch(e){notice(e.message,true);}};row.append(allow);}
       if(record.files.some(f=>f.complete)){const restore=el('button','Show received files','secondary');restore.onclick=async()=>{try{const storage=await BlockStorage.open(record);for(let f=0;f<record.files.length;f++)if(record.files[f].complete)receivedFile({...record.manifest[f],...await storage.completedFile(f)});notice('Verified files shown below.');}catch(e){notice(e.message,true);}};row.append(restore);}
@@ -257,7 +257,7 @@ async function renderRecovery(){
     const remove=el('button','Remove saved data','text-button');remove.onclick=async()=>{if(busy()){notice('Finish or cancel the active transfer first.',true);return;}if(!confirm('Remove this saved transfer and its temporary browser files? Copies already saved to your chosen folder remain.'))return;try{if(record.direction==='receive'){const storage=await BlockStorage.open(record);await storage.cleanup();}await records.remove(record.id);await renderRecovery();}catch(e){notice(e.message,true);}};row.append(remove);$('recoveries').append(row);
   }}catch(e){debug('Saved progress unavailable: '+e.message);}
 }
-function resumeSelected(event){if(!resumeRecord||!event.target.files.length)return;files=[...event.target.files];const record=resumeRecord;resumeRecord=null;const peer=allMembers().find(m=>m.deviceId===record.receiverId&&m.mode==='receive');if(!peer){notice('Receiver disconnected. Reconnect and try again.',true);return;}setMode('send');try{const manifest=manifestFor(files);files=record.manifest.map(meta=>{const index=manifest.findIndex(f=>JSON.stringify(f)===JSON.stringify(meta));if(index<0)throw Error('Choose the same original files or folder to resume.');return files[index];});startSend(peer,record);}catch(e){notice(e.message,true);}event.target.value='';}
+function resumeSelected(event){if(!resumeRecord||!event.target.files.length)return;files=[...event.target.files];const record=resumeRecord;resumeRecord=null;const peer=allMembers().find(m=>m.deviceId===record.receiverId);if(!peer){notice('Receiver disconnected. Reconnect and try again.',true);return;}setMode('send');try{const manifest=manifestFor(files);files=record.manifest.map(meta=>{const index=manifest.findIndex(f=>JSON.stringify(f)===JSON.stringify(meta));if(index<0)throw Error('Choose the same original files or folder to resume.');return files[index];});startSend(peer,record);}catch(e){notice(e.message,true);}event.target.value='';}
 $('resume-picker').onchange=$('resume-folder-picker').onchange=resumeSelected;
 $('pause').onclick=()=>active?.pause();$('resume').onclick=()=>{reconnectAttempts=0;active?.resume();};
 $('debug-enabled').onchange=()=>{$('debug-log').hidden=!$('debug-enabled').checked;};

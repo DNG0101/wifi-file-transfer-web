@@ -170,8 +170,8 @@ export class Room {
     }
     const member = this.members.get(conn.peer);
     if(conn.metadata?.kind==='contact-v3'&&member){let used=false;conn.on('data',message=>{if(used||JSON.stringify(message).length>4096){conn.close();return;}used=true;this.cb.onMessage?.(message,member,response=>{if(conn.open)conn.send(response);});});this.later(()=>conn.close(),90000);return;}
-    if (['file-v2','file-v3'].includes(conn.metadata?.kind) && member && this.mode === 'receive') this.cb.onTransfer?.(conn,member);
-    else conn.on('open', () => { conn.send(JSON.stringify({type:'decline',reason:'Receiver is not in Receive mode. Ask them to choose Receive.'})); this.later(() => conn.close(),300); });
+    if (['file-v2','file-v3'].includes(conn.metadata?.kind) && member) this.cb.onTransfer?.(conn,member);
+    else conn.on('open', () => { conn.send(JSON.stringify({type:'decline',reason:'This transfer channel is not authorized for the connected device.'})); this.later(() => conn.close(),300); });
   }
   connect(id,transferId) {
     if (this.closed || this.state !== 'connected' || this.peer.disconnected) throw Error('Room disconnected. Use Retry connection first.');
