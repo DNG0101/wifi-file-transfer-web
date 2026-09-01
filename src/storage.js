@@ -39,6 +39,10 @@ export async function cleanupApplicationStorage(now=Date.now()){
       tx.oncomplete=resolve;tx.onerror=()=>reject(tx.error);tx.onabort=()=>reject(tx.error||Error('Cleanup interrupted.'));
     });
   }catch{}
+  try{
+    const root=await navigator.storage?.getDirectory?.();
+    if(root)for await(const [name] of root.entries())if(name.startsWith('.wft-'))await root.removeEntry(name,{recursive:true}).catch(()=>{});
+  }catch{}
   try{indexedDB.deleteDatabase('wft-presence-v1');}catch{}
   return true;
 }
