@@ -64,3 +64,43 @@ new = "   await ready;\n   return shared.id||this.id;"
 if old not in s:
     raise SystemExit('missing main peer standby return target')
 p.write_text(s.replace(old,new,1))
+
+# Restore deterministic Peer 2 rendezvous failover. If the peer holding this
+# UUID's assigned slot disappears, repeated topology checks eventually restart
+# Peer 2 so it can claim that fixed slot and keep discovery connected.
+p = Path('src/presence-peer.js')
+s = p.read_text()
+old = """ async ensureTopology(){
+  if(!this.peer||!this.enabled)return;
+  // Every Peer 2 attempts every deterministic rendezvous slot. This removes the
+  // old directional topology where some join orders could take a long time to converge.
+  for(let i=0;i<SLOTS;i++){const id=this.prefix+i;if(id!==this.peer.id)this.connect(id);}
+  // Also dial Peer 2 IDs learned from fresh presence rows. This turns rendezvous
+  // into bootstrap only; active users then synchronize directly when reachable.
+  const rows=await this.db.online();for(const row of rows)if(row.uuid!==this.uuid&&row.peer2Id)this.connect(row.peer2Id);
+ }
+"""
+new = """ async ensureTopology(){
+  if(!this.peer||!this.enabled)return;
+  const assigned=this.prefix+slotFor(this.uuid);
+  if(!this.isSlotLeader){
+   if(this.connections.has(assigned)||this.pending.has(assigned))this.slotMisses=0;
+   else if(++this.slotMisses>=3){this.slotMisses=0;await this.restartNetwork();return;}
+  }
+  // Every Peer 2 attempts every deterministic rendezvous slot. This removes the
+  // old directional topology where some join orders could take a long time to converge.
+  for(let i=0;i<SLOTS;i++){const id=this.prefix+i;if(id!==this.peer.id)this.connect(id);}
+  // Also dial Peer 2 IDs learned from fresh presence rows. This turns rendezvous
+  // into bootstrap only; active users then synchronize directly when reachable.
+  const rows=await this.db.online();for(const row of rows)if(row.uuid!==this.uuid&&row.peer2Id)this.connect(row.peer2Id);
+ }
+ async restartNetwork(){
+  if(this.restarting||!this.enabled||!this.leader)return;this.restarting=true;
+  clearInterval(this.timer);for(const timer of this.pending.values())clearTimeout(timer);this.pending.clear();
+  for(const c of this.connections.values())c.close();this.connections.clear();this.peer?.destroy();this.peer=null;this.starting=false;
+  try{await this.startNetwork();}catch(e){this.state('failed',e.message);}finally{this.starting=false;this.restarting=false;}
+ }
+"""
+if old not in s:
+    raise SystemExit('missing presence topology target')
+p.write_text(s.replace(old,new,1))
