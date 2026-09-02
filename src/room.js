@@ -169,6 +169,7 @@ export class Room {
       conn.on('error', () => conn.close()); return;
     }
     const member = this.members.get(conn.peer);
+    if(conn.metadata?.kind==='connection-probe'&&member){conn.on('open',()=>{conn.send('ready');this.later(()=>conn.close(),300);});return;}
     if(conn.metadata?.kind==='contact-v3'&&member){let used=false;conn.on('data',message=>{if(used||JSON.stringify(message).length>4096){conn.close();return;}used=true;this.cb.onMessage?.(message,member,response=>{if(conn.open)conn.send(response);});});this.later(()=>conn.close(),90000);return;}
     if (['file-v2','file-v3'].includes(conn.metadata?.kind) && member) this.cb.onTransfer?.(conn,member);
     else conn.on('open', () => { conn.send(JSON.stringify({type:'decline',reason:'This transfer channel is not authorized for the connected device.'})); this.later(() => conn.close(),300); });
@@ -177,6 +178,11 @@ export class Room {
     if (this.closed || this.state !== 'connected' || this.peer.disconnected) throw Error('Room disconnected. Use Retry connection first.');
     if (!this.members.has(id)) throw Error('Device left the room.');
     return this.peer.connect(id,{reliable:true,serialization:'raw',metadata:{kind:transferId?'file-v3':'file-v2',transferId}});
+  }
+  probe(id,timeout=20000){
+    if(this.closed||this.state!=='connected'||this.peer.disconnected||!this.members.has(id))return Promise.reject(Error('Device is no longer connected.'));
+    const conn=this.peer.connect(id,{reliable:true,serialization:'raw',metadata:{kind:'connection-probe'}});
+    return new Promise((resolve,reject)=>{let done=false;const finish=(error)=>{if(done)return;done=true;clearTimeout(timer);conn.close();error?reject(error):resolve();};const timer=setTimeout(()=>finish(Error('File connection timed out.')),timeout);conn.on('data',value=>value==='ready'&&finish());conn.on('error',()=>finish(Error('Could not open the file connection.')));conn.on('close',()=>finish(Error('The file connection closed early.')));});
   }
   message(id,message){return new Promise((resolve,reject)=>{if(!this.members.has(id)){reject(Error('Device disconnected.'));return;}const c=this.peer.connect(id,{serialization:'json',reliable:true,metadata:{kind:'contact-v3'}});const timer=setTimeout(()=>{c.close();reject(Error('The other device did not answer.'));},90000);c.on('open',()=>c.send(message));c.on('data',m=>{clearTimeout(timer);resolve(m);c.close();});c.on('error',e=>{clearTimeout(timer);reject(e);});c.on('close',()=>{clearTimeout(timer);reject(Error('Device disconnected.'));});});}
   close() {
