@@ -20,7 +20,7 @@ const downloads=[], cards=new Map();
 let history=[];
 function notice(text,error=false) { $('status').textContent=text; $('status').className=error?'status error':'status'; }
 function debug(text){if(!$('debug-enabled').checked)return;const log=$('debug-log');log.textContent=(log.textContent+'\n'+new Date().toLocaleTimeString()+' '+text).split('\n').slice(-100).join('\n');}
-const directoryRoom={connect:(id,transferId)=>mainPeer.connect(id,transferId)};
+const directoryRoom={connect:(id,transferId)=>mainPeer.connect(id,transferId),probe:(id,timeout)=>mainPeer.probe(id,timeout)};
 function directoryMember(user){return {id:user.peerId,deviceId:user.uuid,name:user.name,mode:'receive',onlineDirectory:true,room:directoryRoom};}
 function renderOnlineUsers(users=[]){
  onlineUsers=users.filter((u,i)=>users.findIndex(x=>x.uuid===u.uuid)===i);
@@ -89,7 +89,7 @@ function renderDevices() {
   const checking=[...(trust?.rooms.values()||[])].some(entry=>['connecting','reconnecting'].includes(entry.room.state));
   $('discovery-status').textContent=available.length?`${available.length} available device${available.length===1?'':'s'} found. Choose a receiver before selecting files.`:checking?'Checking your remembered devices…':'No devices available yet. Use Online discovery, scan a QR, or enter a connection code.';
   if(selectedMember&&!busy()&&!available.some(m=>m.deviceId===selectedMember.deviceId))resetPrepared();
-  const ready=mode==='send'&&!!selectedMember&&preparedConnection===true&&!busy();
+  const ready=mode==='send'&&!!selectedMember&&(preparedConnection===true||!!preparedConnection?.open)&&!busy();
   $('send-panel').hidden=!ready&&!busy();
   if(mode!=='send')$('send-panel').hidden=true;
   $('file-picker').disabled=$('folder-picker').disabled=!ready||!!busy();
@@ -193,23 +193,24 @@ function track(conn,member,outgoing,record) {
 }
 function startSend(member,record) {
   if(busy())return;
-  try {manifestFor(files);const id=record?.transferId||crypto.randomUUID();const connection=member.room.connect(member.id,id);preparedConnection=null;track(connection,member,true,record);debug('Files selected after a successful connection probe; transfer request channel opened.');notice(`Waiting for ${member.name} to accept. Sending starts immediately after acceptance.`);}
+  try {manifestFor(files);const id=record?.transferId||crypto.randomUUID();const connection=!record&&preparedConnection?.open?preparedConnection:member.room.connect(member.id,id);preparedConnection=null;track(connection,member,true,record);debug('Files selected; transfer channel opened to the selected device.');notice(`Waiting for ${member.name} to accept. Sending starts immediately after acceptance.`);}
   catch(e) {notice(e.message,true);}
 }
-function resetPrepared(){prepareGeneration++;preparedConnection=null;selectedMember=null;preparingDevice=false;}
+function resetPrepared(){prepareGeneration++;const conn=preparedConnection;preparedConnection=null;selectedMember=null;preparingDevice=false;if(conn?.close&&conn!==active?.conn)conn.close();}
 function prepareReceiver(member){
   if(busy()){notice('A transfer is already active. Finish or cancel it before selecting another receiver.',true);return;}
   if(!member){notice('That connected device is unavailable.',true);return;}
-  if(preparedConnection===true&&selectedMember?.deviceId===member.deviceId){$('send-panel').scrollIntoView({behavior:'smooth',block:'center'});return;}
+  if((preparedConnection===true||preparedConnection?.open)&&selectedMember?.deviceId===member.deviceId){$('send-panel').scrollIntoView({behavior:'smooth',block:'center'});return;}
   if(mode!=='send')setMode('send');resetPrepared();const generation=prepareGeneration;selectedMember=member;preparingDevice=true;renderDevices();notice(`Opening a secure file connection to ${member.name}…`);
-  Promise.resolve().then(()=>member.room.probe(member.id)).then(()=>{if(generation!==prepareGeneration)return;preparedConnection=true;preparingDevice=false;debug('A file data channel was opened and verified before file selection.');notice(`File connection ready with ${member.name}. Choose files now.`);renderDevices();$('send-panel').scrollIntoView({behavior:'smooth',block:'center'});}).catch(()=>void failPrepared(member,generation));
+  if(member.onlineDirectory){preparedConnection=true;preparingDevice=false;debug('Selected the current advertised Peer 1 endpoint.');notice(`Online route ready with ${member.name}. Choose files now.`);renderDevices();$('send-panel').scrollIntoView({behavior:'smooth',block:'center'});return;}
+  Promise.resolve().then(()=>member.room.probe(member.id)).then(conn=>{if(generation!==prepareGeneration){conn.close();return;}preparedConnection=conn;preparingDevice=false;debug('A file data channel was opened and verified before file selection.');notice(`File connection ready with ${member.name}. Choose files now.`);renderDevices();$('send-panel').scrollIntoView({behavior:'smooth',block:'center'});}).catch(()=>void failPrepared(member,generation));
 }
 async function failPrepared(member,generation){if(generation!==prepareGeneration||busy())return;preparedConnection=null;preparingDevice=false;latestDiagnosis=await connectionDiagnosis();if(generation!==prepareGeneration)return;notice(failedChannelMessage(member.name,latestDiagnosis),true);$('network-result').textContent=latestDiagnosis.summary;renderDevices();}
 function awaitTransfer(conn,member){
   incoming(conn,member);
 }
 function scheduleReconnect(t,member){if(t!==active||t.terminal()||t.direction!=='send')return;clearTimeout(reconnectTimer);if(reconnectAttempts>=4){notice('Automatic retries stopped. Keep both pages open, reconnect if needed, then tap Resume.',true);return;}reconnectTimer=setTimeout(()=>{if(t!==active||t.terminal())return;reconnectAttempts++;const current=allMembers().find(m=>m.deviceId===member.deviceId);try{if(!current)throw Error('Receiver offline');debug('Reconnection attempt '+reconnectAttempts);t.attach(current.room.connect(current.id,t.id));setTimeout(()=>{if(t===active&&t.state==='connecting'){t.interrupted('Connection retry timed out.');}},25000);}catch{scheduleReconnect(t,member);}},[1000,3000,8000,15000][reconnectAttempts]);}
-function incoming(conn,m){if(busy()){const senderId=active?.record?.senderId||active?.options?.senderId;if(active?.direction==='receive'&&conn.metadata?.transferId===active.id&&m.deviceId===senderId){active.attach(conn);return;}if(conn.open)conn.close();else conn.on('open',()=>conn.close());return;}if(conn.metadata?.kind!=='file-v3'){conn.close();return;}track(conn,m,false);}
+function incoming(conn,m){if(busy()){const senderId=active?.record?.senderId||active?.options?.senderId;if(active?.direction==='receive'&&conn.metadata?.transferId===active.id&&m.deviceId===senderId){active.attach(conn);return;}if(conn.open)conn.close();else conn.on('open',()=>conn.close());return;}if(!['file-v3','connection-probe'].includes(conn.metadata?.kind)){conn.close();return;}track(conn,m,false);}
 async function openRoom(host,codeOverride,collisions=0) {
   if(busy()&&active.state!=='reconnecting')return;
   let code;try{code=host?(codeOverride||newCode()):parseRoom(codeOverride||$('room-code').value);}catch(e){notice(e.message,true);$('room-code').focus();return;}
@@ -280,7 +281,7 @@ $('scanner-dialog').addEventListener('close',()=>scanner.stop());
 document.addEventListener('visibilitychange',()=>{if(document.hidden&&$('scanner-dialog').open){scanner.stop();$('scanner-dialog').close();}});
 $('send').onclick=()=>{if(busy())return;setMode('send');if(!room)void openRoom(true);};$('receive').onclick=()=>{if(busy())return;setMode('receive');if(!room)void openRoom(true);};
 function selectFiles(e){
-  if(!selectedMember||preparedConnection!==true||busy()){e.target.value='';notice('Wait until the file connection says ready before choosing files.',true);return;}
+  if(!selectedMember||!(preparedConnection===true||preparedConnection?.open)||busy()){e.target.value='';notice('Wait until the file connection says ready before choosing files.',true);return;}
   files=[...e.target.files];
   try {if(files.length)manifestFor(files);}catch(error){files=[];e.target.value='';notice(error.message,true);}
   $('selection').textContent=files.length?`${files.length} file${files.length===1?'':'s'} · ${fmt(files.reduce((n,f)=>n+f.size,0))} · ${files.map(f=>f.name).join(', ')}`:'No files selected';renderDevices();if(files.length)startSend(selectedMember);

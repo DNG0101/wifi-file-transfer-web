@@ -32,12 +32,12 @@ try{
  const row=(p,name)=>p.locator('#online-users .online-user').filter({hasText:name});
  const assertButtons=async()=>{assert.equal(await row(a,'Receiver B').getByRole('button',{name:'Connect'}).isDisabled(),false);assert.equal(await row(a,'Receiver C').getByRole('button',{name:'Connect'}).isDisabled(),false);};
  await assertButtons();
- await row(a,'Receiver B').getByRole('button',{name:'Connect'}).click();await a.waitForFunction(()=>document.querySelector('#target-name')?.textContent.includes('Receiver B'));assert.equal(await b.locator('#incoming').isVisible(),false);await assertButtons();
- await row(a,'Receiver C').getByRole('button',{name:'Connect'}).click();await a.waitForFunction(()=>document.querySelector('#target-name')?.textContent.includes('Receiver C'));assert.equal(await c.locator('#incoming').isVisible(),false);await assertButtons();
+ await row(a,'Receiver B').getByRole('button',{name:'Connect'}).click();await a.waitForFunction(()=>document.querySelector('#status')?.textContent.includes('Online route ready with Receiver B'),null,{timeout:30000});assert.equal(await b.locator('#incoming').isVisible(),false);await assertButtons();
+ await row(a,'Receiver C').getByRole('button',{name:'Connect'}).click();await a.waitForFunction(()=>document.querySelector('#status')?.textContent.includes('Online route ready with Receiver C'),null,{timeout:30000});assert.equal(await c.locator('#incoming').isVisible(),false);await assertButtons();
  await row(a,'Receiver B').getByRole('button',{name:'Connect'}).click();await a.waitForFunction(()=>document.querySelector('#target-name')?.textContent.includes('Receiver B'));await assertButtons();
  await b.locator('#online-toggle').uncheck();await a.waitForFunction(()=>!(document.querySelector('#online-users')?.innerText||'').includes('Receiver B'),null,{timeout:15000});assert.equal(await row(a,'Receiver C').getByRole('button',{name:'Connect'}).isDisabled(),false);
  await b.locator('#online-toggle').check();await a.waitForFunction(()=>{const t=document.querySelector('#online-users')?.innerText||'';return t.includes('Receiver B')&&t.includes('Receiver C');},null,{timeout:30000});await assertButtons();
  await row(a,'Receiver C').getByRole('button',{name:'Connect'}).click();await a.waitForFunction(()=>document.querySelector('#target-name')?.textContent.includes('Receiver C'));await assertButtons();
  assert.deepEqual(errors,[]);
- console.log('PASS: three isolated users converge; B/C can be selected repeatedly; selecting one never locks the other; Peer 2 OFF removes B and ON restores B without reload.');
+ console.log('PASS: three isolated users converge; Online Peer 1 routes become ready; B/C remain selectable; Peer 2 OFF removes B and ON restores B without reload.');
 }catch(e){await dump('MULTI USER FAILURE');throw e;}finally{for(const ctx of [ctxA,ctxB,ctxC])await ctx?.close().catch(()=>{});await browser.close().catch(()=>{});server.close();}

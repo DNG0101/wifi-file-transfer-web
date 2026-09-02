@@ -52,10 +52,10 @@ export class MainPeerManager{
   return shared.opening;
  }
  accept(conn){
-  if(conn.metadata?.kind==='connection-probe'){conn.on('open',()=>{conn.send('ready');setTimeout(()=>conn.close(),300);});return;}
-  if(conn.metadata?.kind!=='file-v3'){conn.on('open',()=>conn.close());return;}
   const meta=conn.metadata||{};
   const member={id:conn.peer,deviceId:safe(meta.deviceId)||conn.peer,name:safe(meta.name)||'Online user',mode:'receive',onlineDirectory:true};
+  if(meta.kind==='connection-probe'){conn.on('open',()=>{conn.send('ready');this.onIncoming(conn,member);});return;}
+  if(meta.kind!=='file-v3'){conn.on('open',()=>conn.close());return;}
   this.onIncoming(conn,member);
  }
  connect(remoteId,transferId){
@@ -67,7 +67,7 @@ export class MainPeerManager{
  probe(remoteId,timeout=20000){
   const peer=shared.peer||this.peer,id=safe(remoteId);if(!peer||peer.disconnected||!id||id===peer.id)return Promise.reject(Error('Main peer is not ready for this device.'));
   const conn=peer.connect(id,{reliable:true,serialization:'raw',metadata:{kind:'connection-probe',deviceId:this.uuid,name:this.name.slice(0,48)}});
-  return new Promise((resolve,reject)=>{let done=false;const finish=error=>{if(done)return;done=true;clearTimeout(timer);conn.close();error?reject(error):resolve();};const timer=setTimeout(()=>finish(Error('File connection timed out.')),timeout);conn.on('data',value=>value==='ready'&&finish());conn.on('error',()=>finish(Error('Could not open the file connection.')));conn.on('close',()=>finish(Error('The file connection closed early.')));});
+  return new Promise((resolve,reject)=>{let done=false;const finish=error=>{if(done)return;done=true;clearTimeout(timer);if(error){conn.close();reject(error);}else resolve(conn);};const timer=setTimeout(()=>finish(Error('File connection timed out.')),timeout);conn.on('data',value=>value==='ready'&&finish());conn.on('error',()=>finish(Error('Could not open the file connection.')));conn.on('close',()=>finish(Error('The file connection closed early.')));});
  }
  setName(name){this.name=name;}
  async stop(){
