@@ -14,8 +14,8 @@ function dispatchIncoming(conn){
 
 export class MainPeerManager{
  constructor(config={}){
-  const {uuid,name,PeerClass=Peer,options=peerOptions(),onIncoming,onState=()=>{},locks=navigator.locks}=config;
-  Object.assign(this,{uuid,name,PeerClass,options,onIncoming:onIncoming||(()=>{}),onState,locks});
+  const {uuid,name,PeerClass=Peer,options=peerOptions(),onIncoming,onConnectionRequest,onState=()=>{},locks=navigator.locks}=config;
+  Object.assign(this,{uuid,name,PeerClass,options,onIncoming:onIncoming||(()=>{}),onConnectionRequest:onConnectionRequest||(()=>false),onState,locks});this.authorized=new Map();
   this.acceptIncoming=typeof onIncoming==='function';
   this.id=`wftp-main-${uuid}`;this.enabled=false;this.leader=false;
  }
@@ -54,7 +54,9 @@ export class MainPeerManager{
  accept(conn){
   const meta=conn.metadata||{};
   const member={id:conn.peer,deviceId:safe(meta.deviceId)||conn.peer,name:safe(meta.name)||'Online user',mode:'receive',onlineDirectory:true};
-  if(meta.kind==='connection-probe'){conn.on('open',()=>{conn.send('ready');this.onIncoming(conn,member);});return;}
+  if(meta.kind==='connection-request'){conn.on('open',async()=>{let accepted=false;try{accepted=await this.onConnectionRequest(member);}catch{}if(accepted)this.authorized.set(member.deviceId,member);conn.send({type:'connection-response',accepted});setTimeout(()=>conn.close(),200);});return;}
+  if(!this.authorized.has(member.deviceId)){conn.on('open',()=>conn.close());return;}
+  if(meta.kind==='connection-probe'){conn.on('open',()=>conn.send('ready'));return;}
   if(meta.kind!=='file-v3'){conn.on('open',()=>conn.close());return;}
   this.onIncoming(conn,member);
  }
@@ -63,6 +65,11 @@ export class MainPeerManager{
   if(!peer||peer.disconnected)throw Error('Main peer is not ready in this tab.');
   const id=safe(remoteId);if(!id||id===peer.id)throw Error('Invalid destination peer.');
   return peer.connect(id,{reliable:true,serialization:'raw',metadata:{kind:'file-v3',transferId,deviceId:this.uuid,name:this.name.slice(0,48)}});
+ }
+ requestConnection(remoteId,member,timeout=90000){
+  const peer=shared.peer||this.peer,id=safe(remoteId);if(!peer||peer.disconnected||!id||id===peer.id)return Promise.reject(Error('Main peer is not ready for this device.'));
+  const conn=peer.connect(id,{reliable:true,serialization:'json',metadata:{kind:'connection-request',deviceId:this.uuid,name:this.name.slice(0,48)}});
+  return new Promise((resolve,reject)=>{let done=false;const finish=(error,accepted=false)=>{if(done)return;done=true;clearTimeout(timer);conn.close();if(error)reject(error);else if(!accepted)reject(Error('The destination device declined the connection request.'));else{this.authorized.set(member.deviceId,member);resolve(member);}};const timer=setTimeout(()=>finish(Error('The destination device did not answer the connection request.')),timeout);conn.on('data',m=>m?.type==='connection-response'&&finish(null,m.accepted===true));conn.on('error',()=>finish(Error('Could not send the connection request.')));conn.on('close',()=>finish(Error('The connection request closed early.')));});
  }
  probe(remoteId,timeout=20000){
   const peer=shared.peer||this.peer,id=safe(remoteId);if(!peer||peer.disconnected||!id||id===peer.id)return Promise.reject(Error('Main peer is not ready for this device.'));

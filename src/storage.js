@@ -27,7 +27,7 @@ export async function cleanupApplicationStorage(now=Date.now()){
   const marker='wft-last-storage-cleanup';let last=0;
   try{last=Number(localStorage.getItem(marker))||0;}catch{}
   if(last&&now-last<CLEANUP_MS)return false;
-  const keepLocal=new Set(['wft-device-name','wft-device-id','app_device_uuid','wft-device-id-version','wft-device-id-updated',marker]);
+  const keepLocal=new Set(['wft-device-name','wft-device-id','app_device_uuid','wft-device-id-version','wft-device-id-updated','wft-online-enabled',marker]);
   try{
     const values=new Map();for(const key of keepLocal)if(key!==marker){const value=localStorage.getItem(key);if(value!==null)values.set(key,value);}
     localStorage.clear();for(const [key,value] of values)localStorage.setItem(key,value);localStorage.setItem(marker,String(now));

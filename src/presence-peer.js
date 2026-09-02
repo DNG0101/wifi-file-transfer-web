@@ -2,7 +2,9 @@ import * as PeerModule from 'peerjs';
 import {peerOptions} from './room.js';
 import {PresenceDB,HEARTBEAT_MS,MAX_RECORDS,comparePresence,validPresence} from './presence-db.js';
 const Peer=PeerModule.Peer||PeerModule.default.Peer||PeerModule.default;
-const SLOTS=4,MAX_MESSAGE=128*1024,CONNECT_TIMEOUT=12000;
+// One fixed logical Peer 2 rendezvous. Exactly one browser can own the fixed
+// PeerJS ID; all other users attach as clients and keep only bounded presence.
+const SLOTS=1,MAX_MESSAGE=128*1024,CONNECT_TIMEOUT=12000;
 const uuidOk=value=>/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value||'');
 const slotFor=id=>[...id].reduce((n,c)=>(n*33+c.charCodeAt(0))>>>0,5381)%SLOTS;
 const namespaceId=value=>[...value].reduce((n,c)=>(n*16777619^c.charCodeAt(0))>>>0,2166136261).toString(36);
@@ -101,7 +103,7 @@ export class PresencePeerManager{
   const now=Date.now(),revision=this.revision(change||identityChanged),row={uuid:this.uuid,name:this.name.trim().slice(0,48)||'My device',peerId:this.peer1Id||'',peer2Id:this.peer2Id||'',status,version:revision,revision,heartbeatSeq:(previous?.heartbeatSeq||0)+1,lastSeen:now,updatedAt:now};await this.db.put(row,now);this.self=row;return row;
  }
  async tick(){if(this.tickPromise)return this.tickPromise;this.tickPromise=this.runTick().finally(()=>{this.tickPromise=null;});return this.tickPromise;}
- async runTick(){if(!this.enabled||!this.leader)return;for(const [id,time] of this.seen)if(Date.now()-time>10*60*1000)this.seen.delete(id);await this.refreshSelf();if(!this.enabled)return;await this.db.cleanup();await this.ensureTopology();for(const conn of this.connections.values())void this.sendSummary(conn);await this.publish();}
+ async runTick(){if(!this.enabled||!this.leader)return;for(const [id,time] of this.seen)if(Date.now()-time>10*60*1000)this.seen.delete(id);await this.refreshSelf();if(!this.enabled)return;await this.db.cleanup();await this.ensureTopology();await Promise.allSettled([...this.connections.values()].map(conn=>this.sendSummary(conn)));await this.publish();}
  async publish(){const users=await this.db.online();this.onChange(users);this.channel?.postMessage({type:'users',users});}
  handleTabMessage(message){if(!this.leader&&message?.type==='users'&&Array.isArray(message.users))this.onChange(message.users.filter(r=>validPresence(r)));}
  async setIdentity({name=this.name,peer1Id=this.peer1Id}){const changed=name!==this.name||peer1Id!==this.peer1Id;this.name=name;this.peer1Id=peer1Id;if(changed&&this.enabled&&this.leader){await this.refreshSelf(true);for(const c of this.connections.values())void this.sendSummary(c);await this.publish();}}

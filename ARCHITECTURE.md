@@ -1,67 +1,101 @@
-# Architecture — version 3.1
+# End-to-end architecture and lifecycle
+
+## 1. System architecture and workflow
+
+### Invariants
+
+1. Each installation has one reconciled UUID and one UUID-derived Main Peer 1 ID.
+2. Main Peer 1 starts before discovery and carries connection requests, approvals, transfer offers, approvals, frames, acknowledgements, cancellation and recovery.
+3. Peer 2 is discovery only. It never carries file data, approvals, secrets or transfer history.
+4. Peer 2 stores one bounded presence row per UUID: name, Main Peer 1 ID, runtime Peer 2 ID, status, revision, heartbeat and timestamps.
+5. A destination must accept a connection before either peer is connected.
+6. Accepted connections are bidirectional; sender and receiver are roles of one transfer.
+7. Every transfer requires a separate destination Accept/Reject.
+8. No payload is read or sent before transfer acceptance.
+9. New receives require a selected device folder. Browser databases retain metadata, never new payloads.
+10. ACK means a block was validated and durably written; completion additionally requires the final file hash.
 
 ```text
-GitHub Pages → HTML/CSS + local JavaScript bundles
-                          │
-              PeerJS Cloud signaling
-                   ┌──────┴──────┐
-                 Sender      Receiver
-                   └── WebRTC ──┘
-                direct or encrypted TURN relay
+                         PeerJS signaling
+                               |
+              +----------------+----------------+
+              |                                 |
+       User A single tab                 User B single tab
+       Main Peer 1 (A)                   Main Peer 1 (B)
+       Peer 2 client/host                Peer 2 client/host
+              |                                 |
+              +---- fixed logical Peer 2 -------+
+                    presence directory only
 
-File selection → consent manifest → 8 MiB logical block
- → SHA-256 → small binary frames → native backpressure
- → receiver block hash → persistent write → durable metadata → ACK
- → sender hash checkpoint → next block
- → final receiver reconstruction and SHA-256 → file receipt → transfer receipt
+       Main Peer 1 (A) <==== WebRTC ====> Main Peer 1 (B)
+          connection consent, transfer consent and all file traffic
 ```
 
-## Modules
+PeerJS permits only one active owner of a peer ID. Therefore one logical fixed Peer 2 requires an elected browser to own the fixed ID while other browsers use unique runtime IDs to connect to it. If the owner leaves, another browser must claim the same fixed ID. Multiple browsers cannot concurrently own one identical PeerJS ID.
 
-- `app.js`: user workflow, explicit consent, progress/history, recovery, wake lock, diagnostic view.
-- `room.js`: PeerJS registration, expiring invitation roster, private control messages, reconnect, separate file data channels.
-- `devices.js`: random identity/name and mutually approved private remembered pairs (maximum eight).
-- `qr.js`: locally bundled QR decoding; camera tracks stop when dismissed or hidden.
-- `block-transfer.js`: protocol v3, state machine, bounded buffering, durable block offsets, ACK/NACK, pause, recovery.
-- `storage.js`: IndexedDB metadata; destination directory / OPFS / bounded IndexedDB fallback; safe filenames and verification.
-- `integrity.js`, `hash-worker.js`: incremental SHA-256 and versioned checkpoints for the pinned noble implementation.
-- `network.js`: optional short-lived TURN credential retrieval; redundant public STUN remains; retired PeerJS TURN endpoints are filtered out.
-- `transfer.js`: retained v2 compatibility module, regression-tested separately.
+Presence is a bounded `Map<UUID, LatestPresenceRecord>`. Identity reconciliation keeps the highest valid local version, newest update time and deterministic tie winner, then removes obsolete candidates. Presence conflict order is revision, heartbeat, updated time and deterministic content. Newer offline rows hide older online rows; expired rows cannot be resurrected. Input is schema/size validated and capped at 256 distinct rows.
 
-## Sessions and trusted devices
+Trust boundaries: GitHub Pages distributes static code; PeerJS provides signaling; WebRTC carries application traffic; TURN may relay encrypted packets. A discovery route is not authorization. Remembered-device secrets remain pair-specific and never enter Peer 2.
 
-Either Send or Receive creates a private invitation. Both screens share QR generation and scanning; invitations encode the opposite mode. Startup discovery loads remembered pairs. Choosing a receiver opens a raw file channel before exposing the file picker. Receiver transfer construction waits for the first hello (bounded to five minutes), so an idle file picker does not start the transfer heartbeat. Selection sends the manifest on that prepared channel. Consent remains mandatory. Twelve random characters are easier to type than a peer ID and provide materially more guessing resistance than six digits. New peer admission expires after ten minutes; current admitted peers can reconnect and finish. Peer IDs are not displayed in the ordinary UI. Roster membership does not prove a physical network location.
+## 2. Complete phase-by-phase lifecycle
 
-Remembering sends a random 256-bit pair secret over an existing encrypted control connection and requires approval on both devices. Each side stores the other random application identity and a friendly name in IndexedDB. The lexicographically smaller identity hosts a private rendezvous whose address is SHA-256 of the secret; the other joins and proves possession through the encrypted join. Each pair is isolated. Forget closes the pair and deletes the local secret. This is bearer-secret pairing, not independently verified device certificates; signaling and application delivery are trusted.
+### Startup
 
-## Transfer protocol
+1. Reconcile installation UUID and device name.
+2. Run bounded cleanup while preserving identity and Online preference.
+3. Start Main Peer 1.
+4. Only after Main Peer 1 is ready, start Peer 2 when Online is enabled.
+5. Publish Main Peer 1 ID and status; load remembered pairs and recovery metadata.
+6. Run non-blocking route diagnostics.
 
-Every message contains a protocol version and UUID transfer ID. Hello includes a random resume token, manifest and both application device IDs. Previously accepted records must match the token, identities and manifest. The UI passes identities from the selected member. Connection context supplies session membership; resume intentionally survives a new invitation session for the same devices.
+Peer 2 must not publish or show Connect when Main Peer 1 is unavailable. Transient failures retry with backoff and must not erase the Online preference.
 
-The 36-byte binary header contains magic, transfer UUID, file index, block index, offset within block and payload length. File size itself is not encoded as a 32-bit integer. Frames are limited to the negotiated SCTP maximum and at most 64 KiB. One 8 MiB block is outstanding, with about 1 MiB native send-buffer threshold. The sender listens for bufferedamountlow at 256 KiB and checks closure/pause while waiting. Processing is serialized and receiver queued bytes are bounded.
+### Discovery and connection
 
-The receiver sends a block ACK only after hash validation, storage close/transaction completion and metadata persistence. NACK retries the same block, up to three attempts. Receiver progress reports acknowledged full blocks; final completion additionally requires checking the reconstructed persisted file. Empty files follow the same receipt path.
+Peer 2, QR/code and remembered pairs all produce an unconnected candidate containing UUID, name and Main Peer 1 route. Selecting it opens a Main Peer 1 `connection-request`. The destination validates it and displays Accept/Reject. Before acceptance, neither side appears connected and file selection is unavailable. Reject stores nothing. Accept authorizes both directions for that session.
 
-Hash checkpoints include internal chaining words, safe-integer byte count, partial buffer and version; source re-selection rebuilds and checks the acknowledged prefix. Receiver recovery scans saved blocks and truncates progress at the first missing/corrupt block. Verified blocks may be re-read for integrity without being resent. Metadata grows with block count, not file bytes.
+### Transfer offer and consent
 
-States include connecting, waiting, offered, preparing, transferring, paused, reconnecting, verifying and terminal states. Epoch guards prevent abandoned asynchronous connections from continuing a newer session. Keepalives detect inactive peers; approval/storage operations have longer timeouts. Reconnect attempts are bounded. One active batch per tab avoids shared-writer conflicts.
+Either connected peer selects files. Selection builds bounded metadata only—no upload or whole-file read. The sender creates a transfer UUID/token and sends the manifest over Main Peer 1. The destination sees sender, names and sizes, selects a device folder, then Accepts or Rejects. Reject sends no bytes. Accept prepares directory staging and returns verified resume offsets.
 
-## Storage and memory
+### Streaming
 
-New UI receives enforce requireDirectory: 8 MiB part files live in a transfer-specific staging folder under the selected device folder. Browser databases retain recovery metadata and handles, not received payloads. The retained protocol/storage modules can still read historical OPFS/IndexedDB records, but the current UI rejects new or resumed browser-payload receives. Directory outputs receive collision-safe names; path traversal is rejected. Reconstruction reads/writes one block at a time and rechecks the whole-file hash. Until commit, roughly twice file size may be needed. Directory staging blocks are removed after verified output; OPFS blocks/output remain for recovery until the user removes saved data.
+The sender reads one 8 MiB block at a time and emits frames no larger than 64 KiB or the SCTP limit. Native buffered-amount backpressure bounds memory. The receiver bounds queued bytes, reconstructs one block, verifies SHA-256, writes it into directory staging, persists metadata and only then ACKs. Bad blocks receive NACK and retry up to three times. Pause stops new frames; cancel removes partial data; interruption preserves acknowledged offsets. UI updates are throttled and transfer startup is deferred beyond the picker event.
 
-OPFS File objects back download URLs without an application-created full-file byte array. The old internal IndexedDB reconstruction path is capped at 256 MiB and retained for historical recovery only; it is not offered for new receives. The browser may impose additional internal download memory/space limits. Directory permissions can require a fresh user gesture after reload. Browser eviction, actual disk failure and system suspension cannot be prevented by the app.
+### Verification and commit
 
-## Optional online-presence layer (version 4.0)
+The receiver reconstructs output in the selected folder, recalculates the whole-file hash and resolves collision-safe names. It sends `file-complete`, then batch `complete`. Only then may the sender show Verified complete. Staging and terminal metadata are removed; completed device files remain.
 
-The transfer layer remains Peer 1: Room owns QR/code admission, rosters, trusted-device rooms, and raw file channels. Presence never opens a file channel and an online-list entry does not bypass QR/code consent.
+### Repeated/reverse/switch/recovery
 
-PresencePeerManager owns the optional Peer 2. Each active browser identity maps deterministically to one of four rendezvous slots scoped to this deployed origin/path. A Peer 2 first attempts to hold its slot; if occupied, it uses a unique PeerJS runtime ID and connects to the holder. Slot holders form a bounded mesh by connecting only toward lower-numbered slots. This gives every running node a route into the small distributed registry without an N×N connection graph or a cloud database. A client re-runs slot election after repeated holder failures.
+After a terminal transfer, either accepted peer may initiate another, with new transfer approval. Destination switching is allowed only when no transfer owns a writer. Reload restores UUID, remembered pairs and acknowledged metadata. Sender reselects identical files; receiver regrants the original folder. Online-off publishes a newer offline row and stops Peer 2 without stopping Main Peer 1; abrupt closure is handled by expiry.
 
-The persistent installation UUID comes from identity(). It reconciles the supported local identity keys by version, update time, and a deterministic tie break, then removes the obsolete candidate list. The UUID survives while site storage remains intact. A Web Lock permits one tab per browser identity to own Peer 2; BroadcastChannel shares the visible user list. Standby tabs retry the lock every five seconds and take over if the leader closes.
+## 3. Critical dependencies and bottlenecks
 
-PresenceDB uses the separate wft-presence-v1 IndexedDB database and presenceRecords store keyed by UUID, with peerId, status, lastSeen, and updatedAt indexes. It stores records only, never file bytes. Read/compare/write merges occur inside one read-write transaction. A record contains UUID, name, Peer 1 ID, Peer 2 ID, status, version/revision, heartbeat sequence, lastSeen, and updatedAt.
+| Dependency | Purpose | Bottleneck and mitigation |
+|---|---|---|
+| PeerJS signaling | Peer registration | Availability/timeouts; retry and optional self-hosting |
+| ICE/STUN/TURN | Network route | Restrictive NAT needs TURN; diagnostics must distinguish routes |
+| File System Access API | Direct receive | Unsupported browsers may send but cannot receive |
+| IndexedDB | Presence/recovery metadata | Never store new payloads or block offer delivery on irrelevant writes |
+| Web Locks/BroadcastChannel | Per-profile ownership | Avoid split Main/Peer 2 ownership across tabs |
+| Hash worker | Responsive integrity | Bound messages and fail transfer safely if worker stops |
+| Device disk | Staging/output | May need near twice file size; never ACK failed writes |
+| Page lifecycle | Long transfers | Wake lock is advisory; resumability is mandatory |
 
-Conflict order is revision, heartbeat sequence, updatedAt, then deterministic content. Merge is idempotent, keeps one row per UUID, strips undeclared properties, caps the table and messages at 256 records, and rejects invalid or over-age records. The 20-second loop updates only heartbeatSeq for an unchanged identity, removes records older than five minutes, and exchanges summaries. Peers request or send only missing/newer rows. Messages have UUID message IDs and a ten-minute deduplication window; records are not blindly gossiped with an unbounded TTL.
+Primary bottlenecks are Peer 2 host failover, TURN absence, folder API support, mobile suspension and competing tabs using a stable Main Peer ID.
 
-Turning Online off sends a newer offline record, stops heartbeat and sync, closes Peer 2 connections, releases tab leadership, and leaves Peer 1 untouched. Abruptly closing a page may prevent that final message; other peers then remove its row after five minutes. A fresh session reuses the UUID and advances the revision, so it can return without an expired copy winning.
+## 4. Technical risks and release gates
+
+- Fixed Peer 2 can become a single point of failure: require deterministic election, heartbeat and takeover tests.
+- Split tab ownership can advertise unusable Main Peer routes: co-locate Main Peer 1 and Peer 2 ownership.
+- Authorization can be confused: connection and transfer consent must remain separate message/state types.
+- Stale presence can resurrect: merge monotonically and reject expired rows.
+- Page freezes can occur: never buffer whole files, apply backpressure and throttle UI work.
+- False completion can occur: ACK after durable write; complete after final hash.
+- Browser payload retention violates policy: enforce directory-only receives.
+- Cached protocol mismatch can break peers: bump app and service-worker cache versions together.
+
+Release requires: connection accept/reject; transfer accept/reject; A→B and B→A without reconnecting; repeated batches; destination switching; multiple/empty/large files; corruption/NACK; pause/resume; cancellation during writer creation/commit; resume from ACK; remembered reload; QR/code/link; Peer 2 dedupe/offline expiry/owner failover; directory output with zero IndexedDB payload blocks; mobile layout; service-worker subpath loading; and zero page/console errors.
+
+Run build, unit tests, protocol browser integration, full UI flow, large-file, QR, presence, recovery and live two-browser diagnostics. Commit/push `main` only when all pass. Then bump the visible version and cache, deploy, and verify GitHub Pages serves matching HTML, bundle and worker.

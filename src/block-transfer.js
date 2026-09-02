@@ -119,9 +119,10 @@ export class BlockTransfer {
     this.manifest=manifestFor(this.files);this.total=this.manifest.reduce((n,f)=>n+f.size,0);
     if(!this.record)this.record={id:'send:'+this.id,transferId:this.id,token:this.token,direction:'send',manifest:this.manifest,files:this.manifest.map(emptyFile),senderId:this.options.senderId||'local',receiverId:this.options.receiverId||'remote',created:Date.now(),state:'waiting'};
     if(!sameManifest(this.manifest,this.record.manifest))throw Error('Select the same original files, with matching names, sizes, and modification dates, to resume.');
-    await this.store.put(this.record);this.guard(epoch);this.transition('waiting');
-    const accepted=await this.request('hello',{token:this.token,manifest:this.manifest,senderId:this.record.senderId,receiverId:this.record.receiverId,paused:this.localPaused},'accept',epoch);
+    this.guard(epoch);const acceptance=this.request('hello',{token:this.token,manifest:this.manifest,senderId:this.record.senderId,receiverId:this.record.receiverId,paused:this.localPaused},'accept',epoch);this.transition('waiting');
+    const accepted=await acceptance;
     if(!Array.isArray(accepted.files)||accepted.files.length!==this.files.length)throw Error('Invalid saved transfer state.');
+    await this.store.put(this.record);this.guard(epoch);
     this.peerPaused=!!accepted.paused;this.transition(this.localPaused||this.peerPaused?'paused':'transferring');
     const maxMessage=this.conn.peerConnection?.sctp?.maxMessageSize;
     const transport=Math.min(MAX_FRAME,Number.isFinite(maxMessage)&&maxMessage>HEADER?maxMessage:16*1024)-HEADER;

@@ -14,12 +14,22 @@ const $ = id => document.getElementById(id);
 const fmt = n => n<1024?`${n} B`:n<1048576?`${(n/1024).toFixed(1)} KB`:n<1073741824?`${(n/1048576).toFixed(1)} MB`:`${(n/1073741824).toFixed(2)} GB`;
 let room, mode=null, files=[], members=[], active, directory,trust,resumeRecord;
 let selectedMember,preparedConnection,preparingDevice=false,prepareGeneration=0,latestDiagnosis;
-const deviceId=identity();let reconnectTimer,reconnectAttempts=0,presence,mainPeer,onlineUsers=[];
-let connecting=false, attempt=0, lastAttempt, wakeLock, acquiringWake=false;
+const deviceId=identity();let reconnectTimer,reconnectAttempts=0,presence,mainPeer,onlineUsers=[];const connectedOnline=new Map();
+let onlineRetryTimer;
+let connecting=false, attempt=0, lastAttempt, wakeLock, acquiringWake=false, pendingConnectionDecision;
 const downloads=[], cards=new Map();
 let history=[];
 function notice(text,error=false) { $('status').textContent=text; $('status').className=error?'status error':'status'; }
 function debug(text){if(!$('debug-enabled').checked)return;const log=$('debug-log');log.textContent=(log.textContent+'\n'+new Date().toLocaleTimeString()+' '+text).split('\n').slice(-100).join('\n');}
+function requestConnectionApproval(member){
+  if(pendingConnectionDecision)return Promise.resolve(false);
+  $('connection-request-note').textContent=`${member.name} wants to connect. Accepting permits either device to request file transfers; every transfer will still need separate approval.`;
+  $('connection-request').showModal();$('reject-connection').focus();notice(`Connection request from ${member.name}. Accept or reject it.`);
+  return new Promise(resolve=>{pendingConnectionDecision=accepted=>{pendingConnectionDecision=null;if($('connection-request').open)$('connection-request').close();resolve(accepted);};});
+}
+$('accept-connection').onclick=()=>pendingConnectionDecision?.(true);
+$('reject-connection').onclick=()=>pendingConnectionDecision?.(false);
+$('connection-request').addEventListener('cancel',event=>{event.preventDefault();pendingConnectionDecision?.(false);});
 const directoryRoom={connect:(id,transferId)=>mainPeer.connect(id,transferId),probe:(id,timeout)=>mainPeer.probe(id,timeout)};
 function directoryMember(user){return {id:user.peerId,deviceId:user.uuid,name:user.name,mode:'receive',onlineDirectory:true,room:directoryRoom};}
 function renderOnlineUsers(users=[]){
@@ -29,7 +39,7 @@ function renderOnlineUsers(users=[]){
  for(const user of onlineUsers){
   const row=el('div',undefined,'online-user'),identity=el('div');identity.append(el('strong',user.name),el('small',user.uuid===deviceId?'This device':user.peerId?`Peer 1: ${user.peerId}`:'Peer 1 starting…'));
   row.append(identity);
-  if(user.uuid!==deviceId&&user.peerId){const connect=el('button','Connect','secondary');connect.onclick=()=>prepareReceiver(directoryMember(user));row.append(connect);}
+  if(user.uuid!==deviceId&&user.peerId){const connected=connectedOnline.has(user.uuid),connect=el('button',connected?'Connected':'Connect','secondary');connect.disabled=connected;connect.onclick=async()=>{connect.disabled=true;connect.textContent='Waiting for approval…';try{await ensureMainPeer();const member=directoryMember(user);await mainPeer.requestConnection(user.peerId,member);connectedOnline.set(user.uuid,member);notice(`${user.name} accepted the connection. Either device can now send.`);renderOnlineUsers(onlineUsers);renderDevices();}catch(e){notice(e.message,true);connect.disabled=false;connect.textContent='Connect';}};row.append(connect);}
   $('online-users').append(row);
  }
  renderDevices();
@@ -37,10 +47,13 @@ function renderOnlineUsers(users=[]){
 function presenceState(state,detail){$('online-state').textContent=detail||state;debug('Online presence: '+state);}
 async function ensureMainPeer(){
  await networkReady;
- if(!mainPeer)mainPeer=new MainPeerManager({uuid:deviceId,name:$('device-name').value,onIncoming:(conn,m)=>awaitTransfer(conn,{...m,room:directoryRoom}),onState:(state,detail)=>debug(`Main Peer 1 ${state}${detail?' · '+detail:''}`)});
- return await mainPeer.start();
+ if(!mainPeer)mainPeer=new MainPeerManager({uuid:deviceId,name:$('device-name').value,onIncoming:(conn,m)=>awaitTransfer(conn,{...m,room:directoryRoom}),onConnectionRequest:async member=>{const accepted=await requestConnectionApproval(member);if(accepted){const connected={...member,room:directoryRoom};connectedOnline.set(member.deviceId,connected);renderDevices();}return accepted;},onState:(state,detail)=>debug(`Main Peer 1 ${state}${detail?' · '+detail:''}`)});
+ const id=await mainPeer.start();
+ if(!mainPeer.leader||!mainPeer.peer)throw Error('Online connection is active in another tab. Use that tab, or close it and retry here.');
+ return id;
 }
 async function setOnline(enabled){
+ clearTimeout(onlineRetryTimer);
  $('online-toggle').checked=enabled;try{localStorage.setItem('wft-online-enabled',enabled?'1':'0');}catch{}
  if(enabled){
   try{
@@ -48,7 +61,7 @@ async function setOnline(enabled){
    if(!presence)presence=new PresencePeerManager({uuid:deviceId,name:$('device-name').value,peer1Id,onChange:renderOnlineUsers,onState:presenceState});
    else await presence.setIdentity({name:$('device-name').value,peer1Id});
    await presence.start();
-  }catch(e){presenceState('failed',e.message);}
+  }catch(e){presenceState('reconnecting',e.message+' Retrying…');onlineUsers=[];renderOnlineUsers([]);if($('online-toggle').checked)onlineRetryTimer=setTimeout(()=>void setOnline(true),3000);}
  } else {await presence?.stop();onlineUsers=[];renderOnlineUsers([]);}
 }
 const networkReady=configureNetwork().catch(e=>debug(e.message));
@@ -103,9 +116,11 @@ function renderDevices() {
   for(const m of available){const row=el('div',undefined,'download');row.append(el('span',m.name+(m.trusted?' · Remembered':m.onlineDirectory?' · Online directory':'')));if(!m.onlineDirectory&&!m.trusted&&!trust?.contacts.some(c=>c.id===m.deviceId)){const remember=el('button','Remember device','secondary');remember.onclick=async()=>{remember.disabled=true;try{await trust.remember(m);notice('Device remembered. Next time, open this page on both devices.');}catch(e){notice(e.message,true);}finally{remember.disabled=false;}};row.append(remember);}$('connected-devices').append(row);}
 }
 function allMembers(){
- const directory=onlineUsers.filter(u=>u.uuid!==deviceId&&u.peerId).map(directoryMember);
+ const directory=[...connectedOnline.values()].filter(m=>onlineUsers.some(u=>u.uuid===m.deviceId&&u.peerId));
  const byDevice=new Map();
- for(const m of [...(trust?.members()||[]),...members.map(m=>({...m,room}))])if(!byDevice.has(m.deviceId))byDevice.set(m.deviceId,m);
+ // Prefer the currently accepted QR/room path over a parallel remembered path.
+ // Both represent the same UUID, but the active room has the freshest peer ID.
+ for(const m of [...members.map(m=>({...m,room})),...(trust?.members()||[])])if(!byDevice.has(m.deviceId))byDevice.set(m.deviceId,m);
  for(const m of directory){const prior=byDevice.get(m.deviceId);byDevice.set(m.deviceId,{...prior,...m,trusted:!!prior?.trusted||!!m.trusted,onlineDirectory:true});}
  return [...byDevice.values()];
 }
@@ -151,9 +166,8 @@ async function maintainWakeLock() {
 function closeRequest() {if($('incoming').open)$('incoming').close();}
 async function refreshAcceptance() {
   if(active?.state!=='offered')return;
-  const canTemp=!!navigator.storage?.getDirectory;
-  $('accept').disabled=!directory&&!canTemp;
-  $('request-note').textContent=directory?`The verified file will be saved automatically to ${directory.name}.`:canTemp?'Accept to receive. Temporary transfer data uses browser private storage only until verification, then the file download starts automatically.':'Choose a download folder before accepting this file.';
+  $('accept').disabled=!directory;
+  $('request-note').textContent=directory?`The file will stream directly into ${directory.name} after you accept. No payload is stored in browser storage.`:'Choose a destination folder on this device before accepting. No file bytes will be received until then.';
 }
 function receivedFile(file) {
   const line=el('div',undefined,'download');
@@ -173,7 +187,7 @@ function track(conn,member,outgoing,record) {
   const row={id:record?.transferId||conn.metadata?.transferId||crypto.randomUUID(),peer:member.name,direction:outgoing?'send':'receive',state:'connecting',files:[],bytes:0,total:0,time:new Date().toISOString()};
   history.unshift(row);history=history.slice(0,50);drawHistory();save();
   $('history').closest('details').open=true;
-  const t=new BlockTransfer(conn,{files:outgoing?[...files]:undefined,record,id:record?.transferId||conn.metadata?.transferId,senderId:outgoing?deviceId:member.deviceId,receiverId:outgoing?member.deviceId:deviceId,reselected:!!record,requireDirectory:false,onUpdate:update=>{
+  const t=new BlockTransfer(conn,{files:outgoing?[...files]:undefined,record,id:record?.transferId||conn.metadata?.transferId,senderId:outgoing?deviceId:member.deviceId,receiverId:outgoing?member.deviceId:deviceId,reselected:!!record,requireDirectory:!outgoing,onUpdate:update=>{
     const changed=row.state!==update.state,advanced=update.bytes>row.bytes;Object.assign(row,update);updateCard(row);if(changed){save();debug(`${update.direction} ${update.state}: ${fmt(update.bytes)} verified bytes`);}else if(advanced)debug(`${update.direction}: ${fmt(update.bytes)} acknowledged and saved`);
     const terminal=['complete','failed','cancelled','declined'].includes(update.state);
     if(terminal) {
@@ -183,7 +197,7 @@ function track(conn,member,outgoing,record) {
       notice(update.state==='complete'?(outgoing?'Delivered. The receiver verified and saved all files.':'Received and saved directly to your device folder.'):update.detail,update.state!=='complete');
       if(!outgoing&&update.state==='complete')$('received-section').scrollIntoView({behavior:'smooth',block:'center'});
     } else if(update.state==='transferring')notice(`${outgoing?'Sending':'Receiving'}: ${fmt(update.bytes)} of ${fmt(update.total)}. Keep both pages open.`);
-    controls();
+    setTimeout(controls,0);
   },onInterrupted:transfer=>{if(transfer.direction==='send')scheduleReconnect(transfer,member);else if(!transfer.record)transfer.fail('The sender disconnected before the transfer was accepted.','failed',false);},onOffer:manifest=>{
     $('request-title').textContent=`${member.name} wants to send ${manifest.length} file${manifest.length===1?'':'s'}`;
     $('request-files').textContent=manifest.map(f=>`${f.name} (${fmt(f.size)})`).join('\n');
@@ -202,15 +216,14 @@ function prepareReceiver(member){
   if(!member){notice('That connected device is unavailable.',true);return;}
   if((preparedConnection===true||preparedConnection?.open)&&selectedMember?.deviceId===member.deviceId){$('send-panel').scrollIntoView({behavior:'smooth',block:'center'});return;}
   if(mode!=='send')setMode('send');resetPrepared();const generation=prepareGeneration;selectedMember=member;preparingDevice=true;renderDevices();notice(`Opening a secure file connection to ${member.name}…`);
-  if(member.onlineDirectory){preparedConnection=true;preparingDevice=false;debug('Selected the current advertised Peer 1 endpoint.');notice(`Online route ready with ${member.name}. Choose files now.`);renderDevices();$('send-panel').scrollIntoView({behavior:'smooth',block:'center'});return;}
-  Promise.resolve().then(()=>member.room.probe(member.id)).then(conn=>{if(generation!==prepareGeneration){conn.close();return;}preparedConnection=conn;preparingDevice=false;debug('A file data channel was opened and verified before file selection.');notice(`File connection ready with ${member.name}. Choose files now.`);renderDevices();$('send-panel').scrollIntoView({behavior:'smooth',block:'center'});}).catch(()=>void failPrepared(member,generation));
+  preparedConnection=true;preparingDevice=false;debug('Selected an accepted peer for the next transfer.');notice(`Ready to request a file transfer with ${member.name}. Choose files now.`);renderDevices();$('send-panel').scrollIntoView({behavior:'smooth',block:'center'});
 }
 async function failPrepared(member,generation){if(generation!==prepareGeneration||busy())return;preparedConnection=null;preparingDevice=false;latestDiagnosis=await connectionDiagnosis();if(generation!==prepareGeneration)return;notice(failedChannelMessage(member.name,latestDiagnosis),true);$('network-result').textContent=latestDiagnosis.summary;renderDevices();}
 function awaitTransfer(conn,member){
   incoming(conn,member);
 }
 function scheduleReconnect(t,member){if(t!==active||t.terminal()||t.direction!=='send')return;clearTimeout(reconnectTimer);if(reconnectAttempts>=4){notice('Automatic retries stopped. Keep both pages open, reconnect if needed, then tap Resume.',true);return;}reconnectTimer=setTimeout(()=>{if(t!==active||t.terminal())return;reconnectAttempts++;const current=allMembers().find(m=>m.deviceId===member.deviceId);try{if(!current)throw Error('Receiver offline');debug('Reconnection attempt '+reconnectAttempts);t.attach(current.room.connect(current.id,t.id));setTimeout(()=>{if(t===active&&t.state==='connecting'){t.interrupted('Connection retry timed out.');}},25000);}catch{scheduleReconnect(t,member);}},[1000,3000,8000,15000][reconnectAttempts]);}
-function incoming(conn,m){if(busy()){const senderId=active?.record?.senderId||active?.options?.senderId;if(active?.direction==='receive'&&conn.metadata?.transferId===active.id&&m.deviceId===senderId){active.attach(conn);return;}if(conn.open)conn.close();else conn.on('open',()=>conn.close());return;}if(!['file-v3','connection-probe'].includes(conn.metadata?.kind)){conn.close();return;}track(conn,m,false);}
+function incoming(conn,m){if(busy()){const senderId=active?.record?.senderId||active?.options?.senderId;if(active?.direction==='receive'&&conn.metadata?.transferId===active.id&&m.deviceId===senderId){active.attach(conn);return;}if(conn.open)conn.close();else conn.on('open',()=>conn.close());return;}if(conn.metadata?.kind!=='file-v3'){conn.close();return;}track(conn,m,false);}
 async function openRoom(host,codeOverride,collisions=0) {
   if(busy()&&active.state!=='reconnecting')return;
   let code;try{code=host?(codeOverride||newCode()):parseRoom(codeOverride||$('room-code').value);}catch(e){notice(e.message,true);$('room-code').focus();return;}
@@ -219,7 +232,8 @@ async function openRoom(host,codeOverride,collisions=0) {
   if(!busy())resetPrepared();room?.close();members=[];connecting=true;lastAttempt={host,code};controls();
   $('room-info').hidden=true;roomState('connecting','Connecting to the other device…');
   const candidate=new Room({
-    onMembers:list=>{if(token!==attempt)return;members=list;roomState(candidate.state);if(list.length)notice(`${list[0].name} paired. Choose that device to verify the file connection.`);renderDevices();},
+    onConnectionRequest:requestConnectionApproval,
+    onMembers:list=>{if(token!==attempt)return;members=list;roomState(candidate.state);if(list.length)notice(`${list[0].name} connected. Either device can now initiate a file transfer.`);renderDevices();},
     onError:msg=>{if(token===attempt)notice(msg,true);},
     onState:(state,detail)=>{if(token===attempt)roomState(state,detail);},
     onTransfer:(conn,m)=>{if(token!==attempt){conn.close();return;}awaitTransfer(conn,{...m,room:candidate});},
@@ -238,6 +252,7 @@ async function openRoom(host,codeOverride,collisions=0) {
 }
 function leaveRoom() {
   if(busy()){notice('Finish or cancel the file transfer before leaving.',true);return;}
+  pendingConnectionDecision?.(false);
   attempt++;resetPrepared();room?.close();room=null;members=[];connecting=false;
   $('room-info').hidden=true;roomState('closed');controls();notice('Disconnected from invitation. Main Peer 1 remains available while this page is open.');
 }
@@ -284,7 +299,8 @@ function selectFiles(e){
   if(!selectedMember||!(preparedConnection===true||preparedConnection?.open)||busy()){e.target.value='';notice('Wait until the file connection says ready before choosing files.',true);return;}
   files=[...e.target.files];
   try {if(files.length)manifestFor(files);}catch(error){files=[];e.target.value='';notice(error.message,true);}
-  $('selection').textContent=files.length?`${files.length} file${files.length===1?'':'s'} · ${fmt(files.reduce((n,f)=>n+f.size,0))} · ${files.map(f=>f.name).join(', ')}`:'No files selected';renderDevices();if(files.length)startSend(selectedMember);
+  $('selection').textContent=files.length?`${files.length} file${files.length===1?'':'s'} · ${fmt(files.reduce((n,f)=>n+f.size,0))} · ${files.map(f=>f.name).join(', ')}`:'No files selected';renderDevices();
+  if(files.length){const destination=selectedMember;setTimeout(()=>{if(!busy()&&selectedMember?.deviceId===destination.deviceId)startSend(destination);},0);}
 }
 $('file-picker').onchange=$('folder-picker').onchange=selectFiles;
 $('create-room').onclick=()=>openRoom(true);$('join-room').onclick=()=>joinInvitation($('room-code').value);
@@ -297,13 +313,13 @@ $('share-room').hidden=!navigator.share;
 $('share-room').onclick=async()=>{if(!room)return;try{await navigator.share({title:'Send files to my device',url:inviteUrl()});}catch(e){if(e.name!=='AbortError')notice('Use Copy link instead.');}};
 $('cancel').onclick=()=>active?.cancel();$('decline').onclick=()=>active?.decline();
 $('incoming').addEventListener('cancel',e=>{e.preventDefault();active?.decline();});
-$('accept').onclick=async()=>{if(active?.state!=='offered')return;await refreshAcceptance();if($('accept').disabled)return;const destination=directory?{storage:'directory',directory}:navigator.storage?.getDirectory?{storage:'opfs'}:null;if(!destination)return;const transfer=active;await transfer.accept(destination);if(transfer.state==='failed')return;closeRequest();controls();notice(directory?'Receiving and saving automatically into your chosen folder…':'Receiving securely. Download starts automatically after verification…');};
+$('accept').onclick=async()=>{if(active?.state!=='offered')return;await refreshAcceptance();if($('accept').disabled||!directory)return;const transfer=active;await transfer.accept({storage:'directory',directory});if(transfer.state==='failed')return;closeRequest();controls();notice('Receiving directly into your chosen device folder…');};
 async function chooseFolder() {
   try {directory=await window.showDirectoryPicker({mode:'readwrite',startIn:'downloads',id:'wft-receive'});$('folder-status').textContent=`Saving directly to ${directory.name}. No second download step and no browser-stored file contents.`;debug('Device folder selected.');void refreshAcceptance();}
   catch(e){if(e.name!=='AbortError')notice('Could not access folder: '+e.message,true);}
 }
 for(const id of ['choose-folder','request-folder']) {$(id).hidden=typeof window.showDirectoryPicker!=='function';$(id).onclick=chooseFolder;}
-$('direct-save-support').textContent=typeof window.showDirectoryPicker==='function'?'Choose a folder for direct automatic saving. If you do not choose one, supported browsers use temporary private storage and trigger the verified file download automatically.':'This browser will use temporary private storage when available and trigger the verified file download automatically.';
+$('direct-save-support').textContent=typeof window.showDirectoryPicker==='function'?'Choose a device folder before accepting. File payloads are written directly there and are not retained in browser storage.':'This browser cannot receive files because it does not provide direct device-folder access. It can still send files.';
 $('clear-history').onclick=()=>{if(!busy()){history=[];save();drawHistory();}};
 $('keep-awake').onchange=()=>void maintainWakeLock();
 $('network-check').onclick=async()=>{
@@ -314,8 +330,13 @@ $('network-check').onclick=async()=>{
 try {$('device-name').value=localStorage.getItem('wft-device-name')||friendlyName();}catch{$('device-name').value=friendlyName();}
 $('device-name').onchange=()=>{const name=$('device-name').value.trim().slice(0,48)||friendlyName();$('device-name').value=name;try{localStorage.setItem('wft-device-name',name);}catch{}if(room){room.name=name;room.setMode(mode);}if(trust){trust.name=name;for(const {room:r} of trust.rooms.values()){r.name=name;r.setMode(mode||'send');}}mainPeer?.setName(name);void presence?.setIdentity({name,peer1Id:mainPeer?.peer?.id||''}).catch(e=>debug(e.message));};
 trust=new TrustedDevices({id:deviceId,name:$('device-name').value,mode:'send',onChange:()=>{renderDevices();renderTrusted();},onTransfer:awaitTransfer});
-debug('Startup: preparing identity and remembered devices.');
-void cleanupApplicationStorage().then(()=>networkReady).then(()=>trust.load()).then(()=>{if(!mode)notice('Choose Send Files or Receive Files. Turn Online on to discover current users.');void connectionDiagnosis().then(result=>{latestDiagnosis=result;$('network-result').textContent=result.summary;debug('Automatic connection check: '+result.summary);});}).catch(e=>notice('Application startup issue: '+e.message,true));
+debug('Startup: preparing identity, Main Peer 1, and remembered devices.');
+void cleanupApplicationStorage().then(()=>networkReady).then(async()=>{
+  try{await ensureMainPeer();debug('Startup: Main Peer 1 is ready in this tab.');}
+  catch(e){debug('Startup: '+e.message);}
+  await trust.load();
+  try{if(localStorage.getItem('wft-online-enabled')==='1')await setOnline(true);}catch{}
+}).then(()=>{if(!mode)notice('Choose Send Files or Receive Files. Turn Online on to discover current users.');void connectionDiagnosis().then(result=>{latestDiagnosis=result;$('network-result').textContent=result.summary;debug('Automatic connection check: '+result.summary);});}).catch(e=>notice('Application startup issue: '+e.message,true));
 function consumeInvitation(){const params=new URLSearchParams(location.hash.slice(1));if(!(params.get('join')||params.get('room')))return;const value=location.href;window.history.replaceState(null,'',location.pathname+location.search);joinInvitation(value,true);}
 $('refresh-devices').onclick=async()=>{$('refresh-devices').disabled=true;debug('Checking remembered devices again.');try{await networkReady;await trust.load();renderDevices();}catch(e){notice(e.message,true);}finally{$('refresh-devices').disabled=false;}};
 consumeInvitation();window.addEventListener('hashchange',consumeInvitation);
@@ -332,4 +353,3 @@ if(!window.isSecureContext||!window.RTCPeerConnection) {
 }
 if('serviceWorker' in navigator)navigator.serviceWorker.register('./sw.js').catch(()=>{});
 drawHistory();renderDevices();renderOnlineUsers();void renderRecovery();setInterval(()=>{if(room)renderInvite();},30000);
-try{if(localStorage.getItem('wft-online-enabled')==='1')void setOnline(true);}catch{}

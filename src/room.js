@@ -104,7 +104,7 @@ export class Room {
       conn.on('open', () => { if (!this.closed) conn.send({type:'join',code:this.code,member:this.self()}); });
       conn.on('data', m => {
         if (this.closed || this.control !== conn) return;
-        if(m?.type==='rejected'){clearTimeout(timeout);this.timers.delete(timeout);this.rejectJoin=null;reject(Error(m.reason==='expired'?'This invitation has expired. Ask the other device to tap New invitation, then scan its new QR.':'The invitation was rejected. Ask for a new QR.'));conn.close();return;}
+        if(m?.type==='rejected'){clearTimeout(timeout);this.timers.delete(timeout);this.rejectJoin=null;reject(Error(m.reason==='expired'?'This invitation has expired. Ask the other device to tap New invitation, then scan its new QR.':m.reason==='declined'?'The destination device declined the connection request.':'The invitation was rejected. Ask for a new QR.'));conn.close();return;}
         if (m?.type === 'members' && Array.isArray(m.members) && m.members.some(x => x?.id === this.id)) {
           if(Number.isFinite(m.expires))this.expires=m.expires;
           clearTimeout(timeout); this.timers.delete(timeout); joined = true; this.rejectJoin = null;
@@ -158,8 +158,15 @@ export class Room {
         if(Date.now()>this.expires&&!this.members.has(conn.peer)&&!this.admitted.has(conn.peer)){conn.send({type:'rejected',reason:'expired'});this.later(()=>conn.close(),300);return;}
         if(this.settings.expectedDeviceId&&m.member.deviceId!==this.settings.expectedDeviceId){conn.close();return;}
         clearTimeout(timer); this.timers.delete(timer);
-        this.admitted.add(conn.peer);
-        this.members.set(conn.peer,{id:conn.peer,name:m.member.name.slice(0,48),mode:m.member.mode,deviceId:typeof m.member.deviceId==='string'?m.member.deviceId.slice(0,64):conn.peer}); this.broadcast();
+        const member={id:conn.peer,name:m.member.name.slice(0,48),mode:m.member.mode,deviceId:typeof m.member.deviceId==='string'?m.member.deviceId.slice(0,64):conn.peer};
+        if(this.admitted.has(conn.peer)){this.members.set(conn.peer,member);this.broadcast();return;}
+        if(conn.connectionRequestPending)return;
+        conn.connectionRequestPending=true;
+        Promise.resolve(this.cb.onConnectionRequest?.(member)??true).then(accepted=>{
+          conn.connectionRequestPending=false;if(this.closed||!conn.open)return;
+          if(!accepted){conn.send({type:'rejected',reason:'declined'});this.later(()=>conn.close(),300);return;}
+          this.admitted.add(conn.peer);this.members.set(conn.peer,member);this.broadcast();
+        }).catch(()=>{conn.connectionRequestPending=false;if(conn.open){conn.send({type:'rejected',reason:'declined'});this.later(()=>conn.close(),300);}});
       });
       conn.on('close', () => {
         clearTimeout(timer); this.timers.delete(timer);
@@ -169,7 +176,7 @@ export class Room {
       conn.on('error', () => conn.close()); return;
     }
     const member = this.members.get(conn.peer);
-    if(conn.metadata?.kind==='connection-probe'&&member){conn.on('open',()=>{conn.send('ready');this.cb.onTransfer?.(conn,member);});return;}
+    if(conn.metadata?.kind==='connection-probe'&&member){conn.on('open',()=>conn.send('ready'));return;}
     if(conn.metadata?.kind==='contact-v3'&&member){let used=false;conn.on('data',message=>{if(used||JSON.stringify(message).length>4096){conn.close();return;}used=true;this.cb.onMessage?.(message,member,response=>{if(conn.open)conn.send(response);});});this.later(()=>conn.close(),90000);return;}
     if (['file-v2','file-v3'].includes(conn.metadata?.kind) && member) this.cb.onTransfer?.(conn,member);
     else conn.on('open', () => { conn.send(JSON.stringify({type:'decline',reason:'This transfer channel is not authorized for the connected device.'})); this.later(() => conn.close(),300); });

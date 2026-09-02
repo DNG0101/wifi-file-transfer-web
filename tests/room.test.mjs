@@ -36,8 +36,16 @@ test('unverified room connections do not receive member rosters',async()=>{
 });
 test('member removal and closed-room callbacks are deterministic',async()=>{
   let roster=[];const room=new Room({onMembers:m=>roster=m},{PeerClass:FakePeer});const opening=room.open('abcdefgh2345',true,'Host','send');room.peer.emit('open');await opening;
-  const guest=new FakeConn('guest');room.incoming(guest);guest.emit('data',{type:'join',code:'abcdefgh2345',member:{name:'Receiver',mode:'receive'}});
+  const guest=new FakeConn('guest');room.incoming(guest);guest.emit('data',{type:'join',code:'abcdefgh2345',member:{name:'Receiver',mode:'receive'}});await Promise.resolve();await Promise.resolve();
   assert.equal(roster.length,1);guest.close();assert.equal(roster.length,0);room.close();guest.emit('data',{type:'join',code:'abcdefgh2345',member:{name:'Late',mode:'receive'}});assert.equal(room.members.size,0);
+});
+test('destination explicitly accepts or rejects before a joining peer becomes connected',async()=>{
+  let decide;const approval=new Promise(resolve=>decide=resolve);let roster=[];
+  const room=new Room({onConnectionRequest:()=>approval,onMembers:m=>roster=m},{PeerClass:FakePeer});const opening=room.open('abcdefgh2345',true,'Host','receive');room.peer.emit('open');await opening;
+  const guest=new FakeConn('guest');room.incoming(guest);guest.emit('data',{type:'join',code:'abcdefgh2345',member:{name:'Guest',mode:'send',deviceId:'guest-device'}});
+  assert.equal(roster.length,0);decide(true);await Promise.resolve();await Promise.resolve();assert.equal(roster.length,1);room.close();
+  let reject;const refusal=new Promise(resolve=>reject=resolve);const denied=new Room({onConnectionRequest:()=>refusal},{PeerClass:FakePeer});const deniedOpening=denied.open('abcdefgh2345',true,'Host','receive');denied.peer.emit('open');await deniedOpening;
+  const stranger=new FakeConn('stranger');denied.incoming(stranger);stranger.emit('data',{type:'join',code:'abcdefgh2345',member:{name:'Stranger',mode:'send',deviceId:'stranger-device'}});reject(false);await Promise.resolve();await Promise.resolve();assert.equal(denied.members.has('stranger'),false);assert.deepEqual(stranger.sent.at(-1),{type:'rejected',reason:'declined'});denied.close();
 });
 test('disconnected rooms refuse new file connections',async()=>{
   const room=new Room({},{PeerClass:FakePeer});const opening=room.open('abcdefgh2345',true,'Host','send');room.peer.emit('open');await opening;room.members.set('guest',{id:'guest',name:'Receiver',mode:'receive'});room.setState('disconnected');assert.throws(()=>room.connect('guest'),/Retry connection/);room.close();
