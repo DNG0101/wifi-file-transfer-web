@@ -13,7 +13,7 @@ export function identity(){
 }
 export function friendlyName(ua=navigator.userAgent){const browser=/Edg\//.test(ua)?'Edge':/Firefox\//.test(ua)?'Firefox':/Chrome|CriOS/.test(ua)?'Chrome':'Safari';const os=/iPhone/.test(ua)?'iPhone':/iPad/.test(ua)?'iPad':/Android/.test(ua)?'Android':/Windows/.test(ua)?'Windows':/Mac/.test(ua)?'Mac':'Linux';return `${browser} on ${os}`;}
 export class TrustedDevices {
- constructor({id,name,mode,onChange,onTransfer,onError}){Object.assign(this,{id,name,mode,onChange,onTransfer,onError});this.rooms=new Map();this.contacts=[];this.timer=setInterval(()=>void this.refresh(),30000);}
+ constructor({id,name,mode,onChange,onTransfer,onError}){Object.assign(this,{id,name,mode,onChange,onTransfer,onError});this.rooms=new Map();this.contacts=[];}
  async load(){this.contacts=(await deviceRecords.list()).slice(0,8);await this.refresh();}
  async refresh(){
   for(const contact of this.contacts){

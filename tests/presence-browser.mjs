@@ -27,9 +27,10 @@ try{
  await leader.locator('#online-toggle').check();await standby.waitForFunction(()=>document.querySelector('#online-toggle').checked);
  await Promise.all([leader,standby].map(p=>p.waitForFunction(()=>/rendezvous ready|synchronized|another tab/.test(document.querySelector('#online-state').textContent),null,{timeout:30000})));
  const states=await Promise.all([leader,standby].map(p=>p.locator('#online-state').innerText()));assert.equal(states.filter(x=>x.includes('another tab')).length,1);
- const leaderIndex=states.findIndex(x=>x.includes('active'));await [leader,standby][leaderIndex].close();const remaining=[leader,standby][1-leaderIndex];
+ const leaderIndex=states.findIndex(x=>/rendezvous ready|synchronized/.test(x));await [leader,standby][leaderIndex].close();const remaining=[leader,standby][1-leaderIndex];
+ await remaining.locator('#refresh-devices').click();
  await remaining.waitForFunction(()=>/rendezvous ready|synchronized/.test(document.querySelector('#online-state').textContent),null,{timeout:30000});
- console.log('PASS: shared UUID tabs elect one heartbeat peer and standby takes over after leader closes.');
+ console.log('PASS: shared UUID tabs elect one discovery peer and Check again takes over after leader closes.');
  await remaining.locator('#online-toggle').uncheck();await remaining.waitForFunction(()=>document.querySelector('#online-state').textContent.includes('disabled'));
  assert.deepEqual(errors,[]);
  for(const c of [...contexts,shared])await c.close();

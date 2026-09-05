@@ -1,6 +1,6 @@
 import * as PeerModule from 'peerjs';
 import {peerOptions} from './room.js';
-import {PresenceDB,HEARTBEAT_MS,MAX_RECORDS,comparePresence,validPresence} from './presence-db.js';
+import {PresenceDB,MAX_RECORDS,comparePresence,validPresence} from './presence-db.js';
 const Peer=PeerModule.Peer||PeerModule.default.Peer||PeerModule.default;
 // One fixed logical Peer 2 rendezvous. Exactly one browser can own the fixed
 // PeerJS ID; all other users attach as clients and keep only bounded presence.
@@ -20,7 +20,7 @@ export class PresencePeerManager{
   this.enabled=true;this.channel=this.channelFactory?.('wft-presence-v1');this.channel?.addEventListener('message',e=>this.handleTabMessage(e.data));
   this.state('connecting','Starting Peer 2 online discovery…');
   if(this.locks?.request){
-   await this.tryLeadership();this.standbyTimer=setInterval(()=>{if(this.enabled&&!this.leader&&Date.now()>=(this.retryAt||0))void this.tryLeadership();},5000);
+   await this.tryLeadership();
   }else{this.leader=true;try{await this.startNetwork();}catch(e){this.abortNetwork();this.starting=false;this.leader=false;throw e;}}
  }
  async tryLeadership(){if(this.lockPending||!this.enabled||this.leader)return;this.lockPending=true;let settled=false,decided;const ready=new Promise(r=>decided=()=>{if(!settled){settled=true;r();}});
@@ -37,8 +37,7 @@ export class PresencePeerManager{
   this.peer.on('error',e=>{if(!['peer-unavailable','unavailable-id'].includes(e.type))this.state('failed',`Peer 2 connection failed (${e.type||'network'}).`);});
   await this.refreshSelf(true);await this.publish();
   await this.ensureTopology();
-  this.timer=setInterval(()=>void this.tick().catch(e=>this.state('failed',e.message)),HEARTBEAT_MS);
-  this.topologyTimer=setInterval(()=>void this.ensureTopology().catch(e=>this.state('failed',e.message)),5000);
+  // Synchronization is requested by user actions, never by idle polling.
   this.updateNetworkState();
   this.starting=false;
  }
@@ -50,7 +49,8 @@ export class PresencePeerManager{
    const pending=this.pending.get(id);if(pending?.timer)clearTimeout(pending.timer);if(pending)this.pending.delete(id);
    const old=this.connections.get(id);if(old&&old!==conn)old.close();this.connections.set(id,conn);this.updateNetworkState();void this.sendSummary(conn);
   };
-  conn.on('open',promote);conn.on('data',m=>void this.handleMessage(conn,m));
+  let queued=0,work=Promise.resolve();
+  conn.on('open',promote);conn.on('data',m=>{if(queued>=32){conn.close();return;}queued++;work=work.then(()=>this.handleMessage(conn,m)).catch(()=>conn.close()).finally(()=>queued--);});
   const clean=()=>{if(this.connections.get(id)===conn)this.connections.delete(id);const pending=this.pending.get(id);if(pending?.conn===conn){clearTimeout(pending.timer);this.pending.delete(id);}this.updateNetworkState();};
   conn.on('close',clean);conn.on('error',clean);if(conn.open)promote();
  }
@@ -58,7 +58,7 @@ export class PresencePeerManager{
   if(!this.enabled||!this.peer)return;
   if(this.isSlotLeader)this.state('connected',`Online · Peer 2 rendezvous ready · ${this.peer2Id}`);
   else if(this.connections.size)this.state('connected',`Online · Peer 2 synchronized · ${this.peer2Id}`);
-  else this.state('connecting','Peer 2 is online but has not reached the shared rendezvous yet. Retrying…');
+  else this.state('connecting','Discovery is not connected. Tap Check again to retry.');
  }
  connect(id){
   if(!this.peer||!this.enabled||id===this.peer.id||this.connections.has(id)||this.pending.has(id))return;
@@ -87,7 +87,7 @@ export class PresencePeerManager{
  envelope(type,payload){return {type,messageId:crypto.randomUUID(),originUuid:this.uuid,sentAt:Date.now(),payload};}
  send(conn,type,payload){if(!conn.open)return;const message=this.envelope(type,payload);if(JSON.stringify(message).length<=MAX_MESSAGE)conn.send(message);}
  async sendSummary(conn){const rows=await this.db.all();this.send(conn,'SYNC_SUMMARY',{records:rows.slice(0,MAX_RECORDS).map(({uuid,revision,heartbeatSeq,updatedAt})=>({uuid,revision,heartbeatSeq,updatedAt}))});}
- validEnvelope(m){if(!m||typeof m!=='object'||!uuidOk(m.originUuid)||!uuidOk(m.messageId)||!Number.isFinite(m.sentAt)||Math.abs(Date.now()-m.sentAt)>10*60*1000)return false;const size=JSON.stringify(m).length;if(size>MAX_MESSAGE||this.seen.has(m.messageId))return false;this.seen.set(m.messageId,Date.now());return true;}
+ validEnvelope(m){if(!m||typeof m!=='object'||!uuidOk(m.originUuid)||!uuidOk(m.messageId)||!Number.isFinite(m.sentAt)||Math.abs(Date.now()-m.sentAt)>10*60*1000)return false;const size=JSON.stringify(m).length;if(size>MAX_MESSAGE||this.seen.has(m.messageId))return false;this.seen.set(m.messageId,Date.now());while(this.seen.size>1024)this.seen.delete(this.seen.keys().next().value);return true;}
  async handleMessage(conn,m){
   if(!this.validEnvelope(m))return;
   try{
@@ -100,7 +100,11 @@ export class PresencePeerManager{
    }else if(m.type==='SYNC_REQUEST'){
     const ids=m.payload?.uuids;if(!Array.isArray(ids)||ids.length>MAX_RECORDS||ids.some(id=>!uuidOk(id)))return;const wanted=new Set(ids),rows=(await this.db.all()).filter(r=>wanted.has(r.uuid));if(rows.length)this.send(conn,'SYNC_RECORDS',{records:rows});
    }else if(m.type==='SYNC_RECORDS'){
-    const rows=m.payload?.records;if(!Array.isArray(rows)||rows.length>MAX_RECORDS||rows.some(r=>!validPresence(r)))return;await this.db.merge(rows);await this.publish();await this.ensureTopology();for(const c of this.connections.values())if(c!==conn)void this.sendSummary(c);
+    const rows=m.payload?.records;if(!Array.isArray(rows)||rows.length>MAX_RECORDS||rows.some(r=>!validPresence(r)))return;
+    const existing=new Map((await this.db.all()).map(r=>[r.uuid,r]));
+    const changed=rows.filter(r=>!existing.has(r.uuid)||comparePresence(r,existing.get(r.uuid))>0);
+    if(!changed.length)return;
+    await this.db.merge(changed);await this.publish();await this.ensureTopology();for(const c of this.connections.values())if(c!==conn)void this.sendSummary(c);
    }
   }catch{this.state('connected','Peer 2 ignored an invalid presence update.');}
  }
@@ -109,7 +113,7 @@ export class PresencePeerManager{
   const previous=await this.db.all().then(rows=>rows.find(r=>r.uuid===this.uuid));const identityChanged=!previous||previous.name!==this.name||previous.peerId!==this.peer1Id||previous.peer2Id!==this.peer2Id||previous.status!==status;
   const now=Date.now(),revision=this.revision(change||identityChanged),row={uuid:this.uuid,name:this.name.trim().slice(0,48)||'My device',peerId:this.peer1Id||'',peer2Id:this.peer2Id||'',status,version:revision,revision,heartbeatSeq:(previous?.heartbeatSeq||0)+1,lastSeen:now,updatedAt:now};await this.db.put(row,now);this.self=row;return row;
  }
- async tick(){if(this.tickPromise)return this.tickPromise;this.tickPromise=this.runTick().finally(()=>{this.tickPromise=null;});return this.tickPromise;}
+ async tick(){if(this.tickPromise)return this.tickPromise;this.tickPromise=(async()=>{if(this.enabled&&!this.leader)await this.tryLeadership();await this.runTick();})().finally(()=>{this.tickPromise=null;});return this.tickPromise;}
  async runTick(){if(!this.enabled||!this.leader)return;for(const [id,time] of this.seen)if(Date.now()-time>10*60*1000)this.seen.delete(id);await this.refreshSelf();if(!this.enabled)return;await this.db.cleanup();await this.ensureTopology();await Promise.allSettled([...this.connections.values()].map(conn=>this.sendSummary(conn)));await this.publish();this.updateNetworkState();}
  async publish(){const users=await this.db.online();this.onChange(users);this.channel?.postMessage({type:'users',users});}
  handleTabMessage(message){if(!this.leader&&message?.type==='users'&&Array.isArray(message.users))this.onChange(message.users.filter(r=>validPresence(r)));}
@@ -118,6 +122,6 @@ export class PresencePeerManager{
  async stopNow(){
   if(!this.enabled)return;this.enabled=false;clearInterval(this.timer);clearInterval(this.topologyTimer);clearInterval(this.standbyTimer);await this.tickPromise?.catch(()=>{});
   if(this.leader&&this.peer){try{await this.refreshSelf(true,'offline');for(const c of this.connections.values())this.send(c,'SYNC_RECORDS',{records:[this.self]});}catch{}await new Promise(r=>setTimeout(r,100));}
-  for(const pending of this.pending.values())clearTimeout(pending.timer);this.pending.clear();for(const c of this.connections.values())c.close();this.connections.clear();this.peer?.destroy();this.peer=null;this.peer2Id='';this.leader=false;this.releaseLock?.();this.releaseLock=null;this.channel?.close();this.channel=null;this.state('offline','Peer 2 stopped · online discovery disabled.');
+  for(const pending of this.pending.values())clearTimeout(pending.timer);this.pending.clear();for(const c of this.connections.values())c.close();this.connections.clear();this.peer?.destroy();this.peer=null;this.peer2Id='';this.leader=false;this.releaseLock?.();this.releaseLock=null;await this.lockTask;this.channel?.close();this.channel=null;this.state('offline','Peer 2 stopped · online discovery disabled.');
  }
 }

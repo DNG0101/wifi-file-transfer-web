@@ -14,6 +14,14 @@ class FakePeer extends EventEmitter{
 }
 const uuid=n=>`${n.toString(16).padStart(8,'0')}-0000-4000-8000-000000000000`;
 const delay=ms=>new Promise(r=>setTimeout(r,ms));
+test('idle discovery schedules no polling and duplicate records cause no writes or broadcasts',async()=>{
+ FakePeer.peers.clear();const db=new MemoryDB();let writes=0;const original=db.merge.bind(db);db.merge=async(...args)=>{writes++;return original(...args);};
+ const m=new PresencePeerManager({uuid:uuid(90),name:'Action only',db,PeerClass:FakePeer,options:{},locks:null,channelFactory:()=>null});
+ try{await m.start();assert.equal(m.timer,undefined);assert.equal(m.topologyTimer,undefined);assert.equal(m.standbyTimer,undefined);
+ const before=writes;let sends=0;await m.handleMessage({open:true,send(){sends++;}},m.envelope('SYNC_RECORDS',{records:await db.all()}));
+ assert.equal(writes,before);assert.equal(sends,0);await m.tick();assert.ok(writes>before);
+ }finally{await m.stop();}
+});
 test('three online peers converge through separate rendezvous shards without mixing transfer peers',async()=>{
  FakePeer.peers.clear();const managers=[];const dbs=[];
  for(let n=1;n<=3;n++){const db=new MemoryDB();dbs.push(db);const manager=new PresencePeerManager({uuid:uuid(n),name:'Device '+n,peer1Id:'transfer-'+n,db,PeerClass:FakePeer,options:{},locks:null,channelFactory:()=>null});managers.push(manager);await manager.start();}

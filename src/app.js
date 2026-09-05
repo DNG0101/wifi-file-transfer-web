@@ -61,7 +61,7 @@ async function setOnline(enabled){
    if(!presence)presence=new PresencePeerManager({uuid:deviceId,name:$('device-name').value,peer1Id,onChange:renderOnlineUsers,onState:presenceState});
    else await presence.setIdentity({name:$('device-name').value,peer1Id});
    await presence.start();
-  }catch(e){presenceState('reconnecting',e.message+' Retrying…');onlineUsers=[];renderOnlineUsers([]);if($('online-toggle').checked)onlineRetryTimer=setTimeout(()=>void setOnline(true),3000);}
+  }catch(e){presenceState('failed',e.message+' Tap Check again to retry.');onlineUsers=[];renderOnlineUsers([]);}
  } else {await presence?.stop();onlineUsers=[];renderOnlineUsers([]);}
 }
 const networkReady=configureNetwork().catch(e=>debug(e.message));
@@ -338,7 +338,7 @@ void cleanupApplicationStorage().then(()=>networkReady).then(async()=>{
   try{if(localStorage.getItem('wft-online-enabled')==='1')await setOnline(true);}catch{}
 }).then(()=>{if(!mode)notice('Choose Send Files or Receive Files. Turn Online on to discover current users.');void connectionDiagnosis().then(result=>{latestDiagnosis=result;$('network-result').textContent=result.summary;debug('Automatic connection check: '+result.summary);});}).catch(e=>notice('Application startup issue: '+e.message,true));
 function consumeInvitation(){const params=new URLSearchParams(location.hash.slice(1));if(!(params.get('join')||params.get('room')))return;const value=location.href;window.history.replaceState(null,'',location.pathname+location.search);joinInvitation(value,true);}
-$('refresh-devices').onclick=async()=>{$('refresh-devices').disabled=true;debug('Checking remembered devices again.');try{await networkReady;await trust.load();renderDevices();}catch(e){notice(e.message,true);}finally{$('refresh-devices').disabled=false;}};
+$('refresh-devices').onclick=async()=>{$('refresh-devices').disabled=true;debug('Checking online and remembered devices on request.');try{await networkReady;if($('online-toggle').checked){await setOnline(true);await presence?.tick();}await trust.load();renderDevices();}catch(e){notice(e.message,true);}finally{$('refresh-devices').disabled=false;}};
 consumeInvitation();window.addEventListener('hashchange',consumeInvitation);
 $('online-toggle').onchange=()=>void setOnline($('online-toggle').checked);
 window.addEventListener('storage',e=>{if(e.key==='wft-online-enabled')void setOnline(e.newValue==='1');});
@@ -352,4 +352,4 @@ if(!window.isSecureContext||!window.RTCPeerConnection) {
   $('create-room').disabled=$('join-room').disabled=true;
 }
 if('serviceWorker' in navigator)navigator.serviceWorker.register('./sw.js').catch(()=>{});
-drawHistory();renderDevices();renderOnlineUsers();void renderRecovery();setInterval(()=>{if(room)renderInvite();},30000);
+drawHistory();renderDevices();renderOnlineUsers();void renderRecovery();
