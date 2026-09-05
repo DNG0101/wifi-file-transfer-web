@@ -4,7 +4,7 @@ import {PresenceDB,HEARTBEAT_MS,MAX_RECORDS,comparePresence,validPresence} from 
 const Peer=PeerModule.Peer||PeerModule.default.Peer||PeerModule.default;
 // One fixed logical Peer 2 rendezvous. Exactly one browser can own the fixed
 // PeerJS ID; all other users attach as clients and keep only bounded presence.
-const SLOTS=1,MAX_MESSAGE=128*1024,CONNECT_TIMEOUT=12000;
+const SLOTS=1,MAX_MESSAGE=128*1024,CONNECT_TIMEOUT=20000;
 const uuidOk=value=>/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value||'');
 const slotFor=id=>[...id].reduce((n,c)=>(n*33+c.charCodeAt(0))>>>0,5381)%SLOTS;
 const namespaceId=value=>[...value].reduce((n,c)=>(n*16777619^c.charCodeAt(0))>>>0,2166136261).toString(36);
@@ -26,7 +26,7 @@ export class PresencePeerManager{
  async tryLeadership(){if(this.lockPending||!this.enabled||this.leader)return;this.lockPending=true;let settled=false,decided;const ready=new Promise(r=>decided=()=>{if(!settled){settled=true;r();}});
   this.lockTask=this.locks.request('wft-presence-leader',{ifAvailable:true},async lock=>{this.lockPending=false;if(!this.enabled){decided();return;}if(!lock){this.state('standby','Peer 2 is active in another tab.');decided();return;}this.leader=true;try{await this.startNetwork();this.failureCount=0;this.retryAt=0;decided();await new Promise(r=>this.releaseLock=r);}catch(e){this.abortNetwork();this.starting=false;this.leader=false;this.failureCount=(this.failureCount||0)+1;this.retryAt=Date.now()+[5000,15000,30000,60000][Math.min(3,this.failureCount-1)];this.state('failed',e.message);decided();}}).catch(e=>{this.lockPending=false;this.state('failed',e.message);decided();});await ready;
  }
- abortNetwork(){clearInterval(this.timer);for(const pending of this.pending.values())clearTimeout(pending.timer);this.pending.clear();for(const c of this.connections.values())c.close();this.connections.clear();this.peer?.destroy();this.peer=null;this.peer2Id='';}
+ abortNetwork(){clearInterval(this.timer);clearInterval(this.topologyTimer);for(const pending of this.pending.values())clearTimeout(pending.timer);this.pending.clear();for(const c of this.connections.values())c.close();this.connections.clear();this.peer?.destroy();this.peer=null;this.peer2Id='';}
  async startNetwork(){
   if(!this.enabled||this.starting)return;this.starting=true;const slot=slotFor(this.uuid),slotId=this.prefix+slot;
   try{this.peer=await this.createPeer(slotId);this.isSlotLeader=true;}
@@ -38,7 +38,8 @@ export class PresencePeerManager{
   await this.refreshSelf(true);await this.publish();
   await this.ensureTopology();
   this.timer=setInterval(()=>void this.tick().catch(e=>this.state('failed',e.message)),HEARTBEAT_MS);
-  this.state('connected',`Online · Peer 2 active · ${this.peer2Id}`);
+  this.topologyTimer=setInterval(()=>void this.ensureTopology().catch(e=>this.state('failed',e.message)),5000);
+  this.updateNetworkState();
   this.starting=false;
  }
  createPeer(id){return new Promise((resolve,reject)=>{const p=new this.PeerClass(id,this.options),timer=setTimeout(()=>{p.destroy();reject(Error('Peer 2 service did not respond.'));},20000);let done=false;p.on('open',()=>{if(done)return;done=true;clearTimeout(timer);resolve(p);});p.on('error',e=>{if(done)return;done=true;clearTimeout(timer);p.destroy();reject(e);});});}
@@ -47,11 +48,17 @@ export class PresencePeerManager{
   const id=conn.peer;
   const promote=()=>{
    const pending=this.pending.get(id);if(pending?.timer)clearTimeout(pending.timer);if(pending)this.pending.delete(id);
-   const old=this.connections.get(id);if(old&&old!==conn)old.close();this.connections.set(id,conn);void this.sendSummary(conn);
+   const old=this.connections.get(id);if(old&&old!==conn)old.close();this.connections.set(id,conn);this.updateNetworkState();void this.sendSummary(conn);
   };
   conn.on('open',promote);conn.on('data',m=>void this.handleMessage(conn,m));
-  const clean=()=>{if(this.connections.get(id)===conn)this.connections.delete(id);const pending=this.pending.get(id);if(pending?.conn===conn){clearTimeout(pending.timer);this.pending.delete(id);}};
+  const clean=()=>{if(this.connections.get(id)===conn)this.connections.delete(id);const pending=this.pending.get(id);if(pending?.conn===conn){clearTimeout(pending.timer);this.pending.delete(id);}this.updateNetworkState();};
   conn.on('close',clean);conn.on('error',clean);if(conn.open)promote();
+ }
+ updateNetworkState(){
+  if(!this.enabled||!this.peer)return;
+  if(this.isSlotLeader)this.state('connected',`Online · Peer 2 rendezvous ready · ${this.peer2Id}`);
+  else if(this.connections.size)this.state('connected',`Online · Peer 2 synchronized · ${this.peer2Id}`);
+  else this.state('connecting','Peer 2 is online but has not reached the shared rendezvous yet. Retrying…');
  }
  connect(id){
   if(!this.peer||!this.enabled||id===this.peer.id||this.connections.has(id)||this.pending.has(id))return;
@@ -66,14 +73,14 @@ export class PresencePeerManager{
   const assigned=this.prefix+slotFor(this.uuid);
   if(!this.isSlotLeader){
    if(this.connections.has(assigned)||this.pending.has(assigned))this.slotMisses=0;
-   else if(++this.slotMisses>=3){this.slotMisses=0;await this.restartNetwork();return;}
+   else if(++this.slotMisses>=2){this.slotMisses=0;await this.restartNetwork();return;}
   }
   for(let i=0;i<SLOTS;i++){const id=this.prefix+i;if(id!==this.peer.id)this.connect(id);}
   const rows=await this.db.online();for(const row of rows)if(row.uuid!==this.uuid&&row.peer2Id)this.connect(row.peer2Id);
  }
  async restartNetwork(){
   if(this.restarting||!this.enabled||!this.leader)return;this.restarting=true;
-  clearInterval(this.timer);for(const pending of this.pending.values())clearTimeout(pending.timer);this.pending.clear();
+  clearInterval(this.timer);clearInterval(this.topologyTimer);for(const pending of this.pending.values())clearTimeout(pending.timer);this.pending.clear();
   for(const c of this.connections.values())c.close();this.connections.clear();this.peer?.destroy();this.peer=null;this.starting=false;
   try{await this.startNetwork();}catch(e){this.state('failed',e.message);}finally{this.starting=false;this.restarting=false;}
  }
@@ -103,13 +110,13 @@ export class PresencePeerManager{
   const now=Date.now(),revision=this.revision(change||identityChanged),row={uuid:this.uuid,name:this.name.trim().slice(0,48)||'My device',peerId:this.peer1Id||'',peer2Id:this.peer2Id||'',status,version:revision,revision,heartbeatSeq:(previous?.heartbeatSeq||0)+1,lastSeen:now,updatedAt:now};await this.db.put(row,now);this.self=row;return row;
  }
  async tick(){if(this.tickPromise)return this.tickPromise;this.tickPromise=this.runTick().finally(()=>{this.tickPromise=null;});return this.tickPromise;}
- async runTick(){if(!this.enabled||!this.leader)return;for(const [id,time] of this.seen)if(Date.now()-time>10*60*1000)this.seen.delete(id);await this.refreshSelf();if(!this.enabled)return;await this.db.cleanup();await this.ensureTopology();await Promise.allSettled([...this.connections.values()].map(conn=>this.sendSummary(conn)));await this.publish();}
+ async runTick(){if(!this.enabled||!this.leader)return;for(const [id,time] of this.seen)if(Date.now()-time>10*60*1000)this.seen.delete(id);await this.refreshSelf();if(!this.enabled)return;await this.db.cleanup();await this.ensureTopology();await Promise.allSettled([...this.connections.values()].map(conn=>this.sendSummary(conn)));await this.publish();this.updateNetworkState();}
  async publish(){const users=await this.db.online();this.onChange(users);this.channel?.postMessage({type:'users',users});}
  handleTabMessage(message){if(!this.leader&&message?.type==='users'&&Array.isArray(message.users))this.onChange(message.users.filter(r=>validPresence(r)));}
  async setIdentity({name=this.name,peer1Id=this.peer1Id}){const changed=name!==this.name||peer1Id!==this.peer1Id;this.name=name;this.peer1Id=peer1Id;if(changed&&this.enabled&&this.leader){await this.refreshSelf(true);for(const c of this.connections.values())void this.sendSummary(c);await this.publish();}}
  async stop(){if(this.stopping)return this.stopping;if(!this.enabled)return;this.stopping=this.stopNow();try{await this.stopping;}finally{this.stopping=null;}}
  async stopNow(){
-  if(!this.enabled)return;this.enabled=false;clearInterval(this.timer);clearInterval(this.standbyTimer);await this.tickPromise?.catch(()=>{});
+  if(!this.enabled)return;this.enabled=false;clearInterval(this.timer);clearInterval(this.topologyTimer);clearInterval(this.standbyTimer);await this.tickPromise?.catch(()=>{});
   if(this.leader&&this.peer){try{await this.refreshSelf(true,'offline');for(const c of this.connections.values())this.send(c,'SYNC_RECORDS',{records:[this.self]});}catch{}await new Promise(r=>setTimeout(r,100));}
   for(const pending of this.pending.values())clearTimeout(pending.timer);this.pending.clear();for(const c of this.connections.values())c.close();this.connections.clear();this.peer?.destroy();this.peer=null;this.peer2Id='';this.leader=false;this.releaseLock?.();this.releaseLock=null;this.channel?.close();this.channel=null;this.state('offline','Peer 2 stopped · online discovery disabled.');
  }
