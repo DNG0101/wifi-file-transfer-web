@@ -13,13 +13,13 @@ export function identity(){
 }
 export function friendlyName(ua=navigator.userAgent){const browser=/Edg\//.test(ua)?'Edge':/Firefox\//.test(ua)?'Firefox':/Chrome|CriOS/.test(ua)?'Chrome':'Safari';const os=/iPhone/.test(ua)?'iPhone':/iPad/.test(ua)?'iPad':/Android/.test(ua)?'Android':/Windows/.test(ua)?'Windows':/Mac/.test(ua)?'Mac':'Linux';return `${browser} on ${os}`;}
 export class TrustedDevices {
- constructor({id,name,mode,onChange,onTransfer,onError}){Object.assign(this,{id,name,mode,onChange,onTransfer,onError});this.rooms=new Map();this.contacts=[];}
+ constructor({id,name,mode,onChange,onTransfer,onError,onConnectionRequest}){Object.assign(this,{id,name,mode,onChange,onTransfer,onError,onConnectionRequest});this.rooms=new Map();this.contacts=[];}
  async load(){this.contacts=(await deviceRecords.list()).slice(0,8);await this.refresh();}
  async refresh(){
   for(const contact of this.contacts){
    const current=this.rooms.get(contact.id);if(current&&!['closed','disconnected'].includes(current.room.state))continue;
    current?.room.close();const entry={contact,members:[]};
-   const room=new Room({onMembers:list=>{entry.members=list.filter(m=>m.deviceId===contact.id).map(m=>({...m,name:contact.name,trusted:true,room}));this.onChange?.();},onState:()=>this.onChange?.(),onTransfer:(conn,m)=>{if(m.deviceId===contact.id)this.onTransfer(conn,{...m,name:contact.name,trusted:true,room});else conn.close();}}, {deviceId:this.id,expectedDeviceId:contact.id,privateCode:true,inviteLifetime:Infinity});
+   const room=new Room({onConnectionRequest:member=>member.deviceId===contact.id?(this.onConnectionRequest?.({...member,name:contact.name,trusted:true})??false):false,onMembers:list=>{entry.members=list.filter(m=>m.deviceId===contact.id).map(m=>({...m,name:contact.name,trusted:true,room}));this.onChange?.();},onState:()=>this.onChange?.(),onTransfer:(conn,m)=>{if(m.deviceId===contact.id)this.onTransfer(conn,{...m,name:contact.name,trusted:true,room});else conn.close();}}, {deviceId:this.id,expectedDeviceId:contact.id,privateCode:true,inviteLifetime:Infinity});
    entry.room=room;this.rooms.set(contact.id,entry);
    void room.open(contact.secret,this.id<contact.id,this.name,this.mode).catch(()=>{room.close();entry.members=[];this.onChange?.();});
   }this.onChange?.();
