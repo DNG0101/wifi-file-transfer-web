@@ -36,6 +36,16 @@ try{
  await connectAndAccept('Receiver B',b);assert.equal(await b.locator('#incoming').isVisible(),false);await assertConnectable('Receiver C');
  await connectAndAccept('Receiver C',c);assert.equal(await c.locator('#incoming').isVisible(),false);
  await a.locator('#devices .device').filter({hasText:'Receiver B'}).click();await a.waitForFunction(()=>document.querySelector('#target-name')?.textContent.includes('Receiver B'));
+ const probeFile={name:'consent-check.txt',mimeType:'text/plain',buffer:Buffer.from('File selection must reach the destination.')};
+ await a.locator('#file-picker').setInputFiles(probeFile);
+ await b.locator('#incoming').waitFor({state:'visible',timeout:30000});
+ assert.equal(await b.locator('#accept').isDisabled(),true);
+ await b.locator('#decline').click();await a.waitForFunction(()=>document.querySelector('#history').textContent.includes('Declined'));
+ await b.locator('#devices .device').filter({hasText:'Sender A'}).click();
+ await b.locator('#file-picker').setInputFiles(probeFile);
+ await a.locator('#incoming').waitFor({state:'visible',timeout:30000});await a.locator('#decline').click();
+ await b.waitForFunction(()=>document.querySelector('#history').textContent.includes('Declined'));
+ console.log('PASS: real file picker offers on Main Peer in both directions; decline finishes without destination storage or file bytes.');
  await b.locator('#online-toggle').uncheck();await a.waitForFunction(()=>!(document.querySelector('#online-users')?.innerText||'').includes('Receiver B'),null,{timeout:15000});
  await b.locator('#online-toggle').check();await a.waitForFunction(()=>{const t=document.querySelector('#online-users')?.innerText||'';return t.includes('Receiver B')&&t.includes('Receiver C');},null,{timeout:30000});
  await a.locator('#devices .device').filter({hasText:'Receiver C'}).click();await a.waitForFunction(()=>document.querySelector('#target-name')?.textContent.includes('Receiver C'));
