@@ -12,10 +12,11 @@ const browser=await chromium.launch({channel:'chrome',headless:true});const erro
 try {
  const contextA=await browser.newContext({acceptDownloads:true}),contextB=await browser.newContext({acceptDownloads:true});
  const a=await contextA.newPage(),b=await contextB.newPage();
+ await contextA.addInitScript(()=>localStorage.setItem('wft-online-enabled','1'));
  for(const p of [a,b]){p.on('pageerror',e=>errors.push(e.message));await p.goto(url);await p.locator('#name-dialog').waitFor({state:'visible'});}
  await a.locator('#welcome-name').fill('日本の端末');await a.locator('#name-form button').click();
  await b.locator('#welcome-name').fill('هاتف أحمد');await b.locator('#name-form button').click();
- for(const p of [a,b])assert.equal(await p.locator('#name-dialog').isVisible(),false);
+ for(const p of [a,b]){assert.equal(await p.locator('#name-dialog').isVisible(),false);assert.equal(await p.locator('#online-toggle').isChecked(),false);}
  await a.reload();assert.equal(await a.locator('#name-dialog').isVisible(),false);
  assert.equal(await a.locator('#device-name').inputValue(),'日本の端末');
  await b.locator('#receive').click();await b.waitForFunction(()=>document.querySelector('#current-room').textContent.trim().length>0);
@@ -52,6 +53,11 @@ try {
  await b.getByRole('button',{name:'Show received files'}).first().waitFor();
  const restored=b.waitForEvent('download');await b.getByRole('button',{name:'Show received files'}).first().click();
  assert.equal(await (await restored).failure(),null);
+ await b.locator('#clear-downloads').click();
+ await b.waitForFunction(()=>document.querySelector('#status').textContent.includes('completed transfer copies cleared'));
+ assert.equal(await b.locator('#recovery-section').isVisible(),false);
+ assert.equal(await b.locator('#downloads a').count(),0);
+ assert.equal(await b.evaluate(async()=>{const root=await navigator.storage.getDirectory();for await(const [name] of root.entries())if(name.startsWith('.wft-'))return false;return true;}),true);
  await a.setViewportSize({width:360,height:800});
  assert.equal(await a.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
  assert.deepEqual(errors,[]);

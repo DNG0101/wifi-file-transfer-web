@@ -1,4 +1,4 @@
-# Wi-Fi File Transfer — version 4.7.0
+# Wi-Fi File Transfer — version 4.8.0
 
 [Open the app](https://dng0101.github.io/wifi-file-transfer-web/)
 
@@ -34,7 +34,7 @@ A disconnected transfer preserves verified blocks. Automatic reconnect uses boun
 
 After the sender reloads, use **Saved progress → Reselect files & resume** after reconnecting the original receiver. Select the same original files or folder. Names, sizes, modification times, and already acknowledged content are checked. Browser permissions do not allow silently reopening arbitrary source files. On receiver reload, **Show received files** restores verified download links. Legacy direct-folder transfers may still request their original folder permission. Accepted transfer tokens bind resume requests to saved metadata and application device identities.
 
-Browser storage can be cleared or evicted. Keep original files until delivery is verified. Completed downloads remain recoverable until you use **Remove saved data**. The app no longer runs destructive periodic startup cleanup. Remove saved data deliberately to free space; copies already downloaded to your device remain. Cancel removes temporary data. History contains metadata, not a substitute for saved files.
+Browser storage can be cleared or evicted. Keep original files until delivery is verified. After checking that downloads finished, choose **Downloads saved — clear temporary copies**. This deletes completed receiver staging, verified temporary files, recovery records and active download links. Incomplete transfers are preserved, and downloaded device files are unaffected. You can also remove one saved transfer in Saved progress. The app no longer runs destructive periodic startup cleanup. Remove saved data deliberately to free space; copies already downloaded to your device remain. Cancel removes temporary data. History contains metadata, not a substitute for saved files.
 
 ## Connection and privacy
 
@@ -72,7 +72,7 @@ Browser tests require installed Google Chrome and internet access. The large tes
 
 Publish main, root directory. Commit source, lockfile, `assets/app.js`, and `assets/hash-worker.js` together after building. Relative URLs support repository subpaths. The service worker caches an offline app shell; it does not provide offline signaling. See [deployment](DEPLOYMENT.md).
 
-The original static application remains at `legacy.html` for reference. Version 2's transfer module and regression tests remain during migration; the current interface uses the version 3 block protocol. Reload both devices after upgrading; version 4.7.0 uses a confirmed connection handshake for online pairing. One active transfer per tab is intentional to prevent conflicting destination writes; a batch can contain up to 200 files.
+The original static application remains at `legacy.html` for reference. Version 2's transfer module and regression tests remain during migration; the current interface uses the version 3 block protocol. Reload both devices after upgrading; version 4.7.0 uses a confirmed connection handshake for online pairing. One active transfer per tab is intentional to prevent conflicting destination writes; the picker accepts large selections without a fixed total-count limit. The app queues protocol batches of at most 200 files (smaller when UTF-8 metadata requires it). Each batch requires receiver acceptance; keep the sender page open for the remaining queue.
 
 ### QR connection help (3.2)
 
@@ -82,7 +82,7 @@ QR regressions: npm run test:qr exercises actual QR decoding from synthetic came
 
 ## Optional Online discovery
 
-Turn **Online** on to advertise a small presence record while this page is running and list other active installations. This creates a separate presence-only Peer 2. QR codes, connection codes, transfer approval, direct folder saving, and all file bytes continue through the existing Peer 1 flow.
+Discovery starts **Off on every page visit**, including reloads and returning users. Its setting is not persisted or mirrored to other tabs. Turn **Online** on to advertise a small presence record while this page is running and list other active installations. This creates a separate presence-only Peer 2. QR codes, connection codes, transfer approval, direct folder saving, and all file bytes continue through the existing Peer 1 flow.
 
 Presence records live in IndexedDB and synchronize through browser peers every 20 seconds. They contain a persistent installation UUID, display name, current peer IDs, revision, heartbeat sequence, and timestamps. They do not contain files. Records older than five minutes are deleted and rejected if another peer later sends the stale copy.
 
@@ -91,3 +91,11 @@ Online discovery excludes this device's own identity. Tap **Connect** and wait f
 ## International names and display
 
 Names accept Unicode, normalize to NFC, and use automatic text direction for right-to-left scripts. Number formatting follows the browser locale. The interface text is currently English; this release does not add a full translation catalog. Browsers remember names per site/profile; clearing site storage causes the first-visit prompt to return.
+
+## Folders, large selections, and cleanup (4.8.0)
+
+Select a folder to send a single uncompressed ZIP64 download that preserves relative paths and UTF-8 filenames. Archive payloads are read on demand in blocks of at most 8 MiB; the sender does not create a complete temporary ZIP or load the entire folder into memory. ZIP64 supports size fields beyond 4 GiB. Browser file pickers do not expose empty subfolders. Resume an interrupted folder by reselecting the same original folder. Archive entry ordering and timestamps are deterministic.
+
+The code validates a maximum of 1 TiB for each transferred file or generated archive. That is a protocol limit, not a tested browser capacity guarantee. Receiver quota, free device space, download behavior, and keeping both devices awake still constrain actual transfers. The receiver removes temporary block fragments after verification, retaining only the verified temporary download copy until you confirm cleanup. Because websites cannot confirm final download success, cleanup is deliberately user-triggered.
+
+A large plain-file selection becomes a queue. Successful batches advance automatically; a decline, cancellation or error pauses remaining batches. Use Continue queue or Clear queued files. Queued source-file selections are held only while the sender page is open.

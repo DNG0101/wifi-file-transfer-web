@@ -24,7 +24,7 @@ try{
  console.log('PASS: three independent browser identities converge; UUID persists across reload; stale rows cannot resurrect; returning identity is accepted.');
 
  const shared=await browser.newContext(),leader=await openPage(shared,'Shared tabs'),standby=await shared.newPage();await standby.goto(url);
- await leader.locator('#online-toggle').check();await standby.waitForFunction(()=>document.querySelector('#online-toggle').checked);
+ await leader.locator('#online-toggle').check();assert.equal(await standby.locator('#online-toggle').isChecked(),false);await standby.locator('#online-toggle').check();
  await Promise.all([leader,standby].map(p=>p.waitForFunction(()=>/rendezvous ready|synchronized|another tab/.test(document.querySelector('#online-state').textContent),null,{timeout:30000})));
  const states=await Promise.all([leader,standby].map(p=>p.locator('#online-state').innerText()));assert.equal(states.filter(x=>x.includes('another tab')).length,1);
  const leaderIndex=states.findIndex(x=>/rendezvous ready|synchronized/.test(x));await [leader,standby][leaderIndex].close();const remaining=[leader,standby][1-leaderIndex];

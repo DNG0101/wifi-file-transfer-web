@@ -1,3 +1,7 @@
+# Version 4.8.0 behavior update
+
+Discovery is off at every page load and is tab-local. Completed receiver copies are explicitly deleted by the Downloads saved action; incomplete records stay intact. OPFS block fragments are removed after verified output is committed. Large selections queue bounded protocol batches instead of a total 200-file cap. Folder selections use a sliceable, uncompressed ZIP64 archive with UTF-8 paths and incremental CRC32. Source file payloads stay in their original File objects. A stored sourceFolder marker allows resuming by reselecting the folder.
+
 # Version 4.7.0 behavior update
 
 - New receives use OPFS staging (or a bounded IndexedDB fallback) and normal browser downloads. Folder picking is retained only for legacy recovery.

@@ -123,13 +123,13 @@ export class BlockStorage {
       if(isCancelled())throw Error('Verification cancelled before completion was acknowledged.');
       state.digest=digest;state.complete=true;state.outputName=output?.name;state.outputHandle=output?.handle;
       await records.put(this.record);
-      if(this.record.storage==='directory')for(let b=0;b<state.next;b++)await this.removeBlock(file,b);
+      if(this.staging)for(let b=0;b<state.next;b++)await this.removeBlock(file,b);
       return this.record.storage==='directory'?{savedName:output.name}:{blob:output?await output.handle.getFile():new Blob(fallback,{type:'application/octet-stream'})};
     }catch(e){await writer?.abort().catch(()=>{});throw e;}finally{hash.close();}
   }
   async completedFile(file) {const state=this.record.files[file];if(this.record.storage==='directory')return {savedName:state.outputName};if(state.outputHandle)return {blob:await state.outputHandle.getFile()};return this.finalize(file,state,state.digest);}
   async cleanup() {
-    if(this.staging)await this.root.removeEntry('.wft-'+this.record.transferId,{recursive:true}).catch(()=>{});
+    if(this.staging)await this.root.removeEntry('.wft-'+this.record.transferId,{recursive:true}).catch(error=>{if(error.name!=='NotFoundError')throw error;});
     else for(let f=0;f<this.record.files.length;f++)for(let b=0;b<this.record.files[f].next;b++)await this.removeBlock(f,b);
   }
 }
