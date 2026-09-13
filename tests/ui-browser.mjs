@@ -19,7 +19,7 @@ try {
  for(const p of [a,b]){assert.equal(await p.locator('#name-dialog').isVisible(),false);assert.equal(await p.locator('#online-toggle').isChecked(),false);}
  await a.reload();assert.equal(await a.locator('#name-dialog').isVisible(),false);
  assert.equal(await a.locator('#device-name').inputValue(),'日本の端末');
- await b.locator('#receive').click();await b.waitForFunction(()=>document.querySelector('#current-room').textContent.trim().length>0);
+ await b.locator('#transfer').click();await b.waitForFunction(()=>document.querySelector('#current-room').textContent.trim().length>0);
  const code=(await b.locator('#current-room').innerText()).replaceAll('-','');
  await a.goto(url+'#join='+code);
  await b.locator('#connection-request').waitFor({state:'visible',timeout:60000});
@@ -28,6 +28,7 @@ try {
  for(const p of [a,b])await p.locator('#connected-panel').waitFor({state:'visible',timeout:60000});
  async function send(sender,receiver,name,buffer){
    await sender.locator('#devices button').first().click();
+   assert.equal(await sender.locator('#devices button').first().innerText(),'Send');
    await sender.locator('#send-panel').waitFor({state:'visible',timeout:30000});
    await sender.locator('#file-picker').setInputFiles({name,mimeType:'application/octet-stream',buffer});
    await receiver.locator('#incoming').waitFor({state:'visible',timeout:30000});
@@ -50,16 +51,14 @@ try {
  await send(a,b,'empty.txt',Buffer.alloc(0));
  assert.equal(await b.locator('#recovery-section').isVisible(),true);
  await b.reload();assert.equal(await b.locator('#name-dialog').isVisible(),false);
- await b.getByRole('button',{name:'Show received files'}).first().waitFor();
- const restored=b.waitForEvent('download');await b.getByRole('button',{name:'Show received files'}).first().click();
- assert.equal(await (await restored).failure(),null);
- await b.locator('#clear-downloads').click();
- await b.waitForFunction(()=>document.querySelector('#status').textContent.includes('completed transfer copies cleared'));
+ await b.waitForFunction(()=>document.querySelector('#download-memory').textContent.includes('Completed temporary copies cleared'));
  assert.equal(await b.locator('#recovery-section').isVisible(),false);
  assert.equal(await b.locator('#downloads a').count(),0);
  assert.equal(await b.evaluate(async()=>{const root=await navigator.storage.getDirectory();for await(const [name] of root.entries())if(name.startsWith('.wft-'))return false;return true;}),true);
+ assert.equal(await a.locator('nav #transfer').count(),1);
+ assert.equal(await a.locator('#send,#receive').count(),0);
  await a.setViewportSize({width:360,height:800});
  assert.equal(await a.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
  assert.deepEqual(errors,[]);
- console.log('PASS: first-visit Unicode names, returning user, mutual consent, two-way transfers, browser downloads, empty/binary files, fallback links, recovery, mobile layout.');
+ console.log('PASS: first-visit Unicode names, returning user, mutual consent, two-way transfers, browser downloads, empty/binary files, fallback links, automatic refresh cleanup, one Transfer control, per-device Send, mobile layout.');
 }finally{await browser.close();server.close();}

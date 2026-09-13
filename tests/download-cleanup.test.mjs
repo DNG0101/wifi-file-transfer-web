@@ -19,6 +19,15 @@ export async function checkDownloadCleanup(install){
 
 test('download cleanup preserves incomplete data and does not discard failed deletions',async()=>{
  const source=await readFile(new URL('../src/app.js',import.meta.url),'utf8');
- const implementation=source.slice(source.indexOf("$('clear-downloads').onclick"),source.indexOf('function track('));
+ const implementation=source.slice(source.indexOf('async function clearCompletedDownloads('),source.indexOf('function track('));
  await checkDownloadCleanup(deps=>new Function('deps',"const {$,records,downloads,BlockStorage,URL,busy,renderRecovery,number,notice}=deps;\n"+implementation)(deps));
+});
+
+test('only refresh automatically triggers completed-copy cleanup',async()=>{
+ const source=await readFile(new URL('../src/app.js',import.meta.url),'utf8');
+ const statement=source.split('\n').find(line=>line.startsWith('const startupStorageReady='));
+ for(const type of ['reload','navigate','back_forward']){
+  let calls=0;await new Function('performance','clearCompletedDownloads',statement+'\nreturn startupStorageReady;')({getEntriesByType:()=>[{type}]},async()=>{calls++;});
+  if(calls!==(type==='reload'?1:0))throw Error('Cleanup triggered for incorrect navigation');
+ }
 });

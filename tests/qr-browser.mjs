@@ -32,12 +32,12 @@ async function scan(target,source){
 try {
  for(const hostMode of ['send','receive']){
   const host=await page(),guest=await page();
-  await host.locator('#'+hostMode).click();await host.locator('#current-room').waitFor();
+  await host.locator('#transfer').click();await host.locator('#current-room').waitFor();
   // The scanning device already has its own invitation in the same mode.
-  await guest.locator('#'+hostMode).click();await guest.locator('#current-room').waitFor();
+  await guest.locator('#transfer').click();await guest.locator('#current-room').waitFor();
   await scan(guest,host);await host.locator('#connection-request').waitFor({state:'visible',timeout:60000});await host.locator('#accept-connection').click();await guest.locator('#connected-panel').waitFor({state:'visible',timeout:60000});
   await host.locator('#connected-panel').waitFor({state:'visible',timeout:60000});
-  assert.equal(await guest.locator('#'+(hostMode==='send'?'receive':'send')).getAttribute('aria-pressed'),'true');
+  assert.equal(await guest.locator('#transfer').getAttribute('aria-pressed'),'true');
   const code=await host.locator('#current-room').innerText();
   await scan(host,host);assert.equal(await host.locator('#current-room').innerText(),code);
   assert.ok((await host.locator('#status').innerText()).includes('current invitation'));
@@ -48,12 +48,12 @@ try {
   console.log('PASS actual QR camera-frame decoding, role '+hostMode+', repeated/self scans preserve pairing, file channel opens.');
   await host.close();await guest.close();
  }
- const host=await page();await host.locator('#receive').click();await host.locator('#current-room').waitFor();
+ const host=await page();await host.locator('#transfer').click();await host.locator('#current-room').waitFor();
  const code=(await host.locator('#current-room').innerText()).replaceAll('-','');
  const racing=await browser.newPage();racing.on('pageerror',e=>errors.push(e.message));
  let release;const held=new Promise(r=>release=r);
  await racing.route('**/connection-config.json',async route=>{await held;await route.fulfill({json:{}});});
- await racing.addInitScript(()=>localStorage.setItem('wft-device-name','Racing device'));await racing.goto(url);await racing.locator('#send').click();
+ await racing.addInitScript(()=>localStorage.setItem('wft-device-name','Racing device'));await racing.goto(url);await racing.locator('#transfer').click();
  await racing.evaluate(code=>{location.hash='join='+code+'&mode=send';},code);
  await racing.waitForFunction(()=>!location.hash);release();
  await host.locator('#connection-request').waitFor({state:'visible',timeout:60000});await host.locator('#accept-connection').click();

@@ -35,13 +35,13 @@ try{
  await assertConnectable('Receiver B');await assertConnectable('Receiver C');
  await connectAndAccept('Receiver B',b);assert.equal(await b.locator('#incoming').isVisible(),false);await assertConnectable('Receiver C');
  await connectAndAccept('Receiver C',c);assert.equal(await c.locator('#incoming').isVisible(),false);
- await a.locator('#devices .device').filter({hasText:'Receiver B'}).click();await a.waitForFunction(()=>document.querySelector('#target-name')?.textContent.includes('Receiver B'));
+ await a.locator('#devices .device').filter({hasText:'Receiver B'}).getByRole('button').click();await a.waitForFunction(()=>document.querySelector('#target-name')?.textContent.includes('Receiver B'));
  const probeFile={name:'consent-check.txt',mimeType:'text/plain',buffer:Buffer.from('File selection must reach the destination.')};
  await a.locator('#file-picker').setInputFiles(probeFile);
  await b.locator('#incoming').waitFor({state:'visible',timeout:30000});
  await b.waitForFunction(()=>!document.querySelector('#accept').disabled);assert.equal(await b.locator('#request-folder').isVisible(),false);
  await b.locator('#decline').click();await a.waitForFunction(()=>document.querySelector('#history').textContent.includes('Declined'));
- await b.locator('#devices .device').filter({hasText:'Sender A'}).click();
+ await b.locator('#devices .device').filter({hasText:'Sender A'}).getByRole('button').click();
  await b.locator('#file-picker').setInputFiles(probeFile);
  await a.locator('#incoming').waitFor({state:'visible',timeout:30000});await a.locator('#decline').click();
  await b.waitForFunction(()=>document.querySelector('#history').textContent.includes('Declined'));
@@ -49,7 +49,7 @@ try{
  await b.locator('#online-toggle').uncheck();await a.waitForFunction(()=>!(document.querySelector('#online-users')?.innerText||'').includes('Receiver B'),null,{timeout:15000});
  assert.ok((await a.locator('#connected-devices').innerText()).includes('Receiver B'),'Discovery off must preserve established connection');
  await b.locator('#online-toggle').check();await a.waitForFunction(()=>{const t=document.querySelector('#online-users')?.innerText||'';return t.includes('Receiver B')&&t.includes('Receiver C');},null,{timeout:30000});
- await a.locator('#devices .device').filter({hasText:'Receiver C'}).click();await a.waitForFunction(()=>document.querySelector('#target-name')?.textContent.includes('Receiver C'));
+ await a.locator('#devices .device').filter({hasText:'Receiver C'}).getByRole('button').click();await a.waitForFunction(()=>document.querySelector('#target-name')?.textContent.includes('Receiver C'));
  assert.deepEqual(errors,[]);
  console.log('PASS: three isolated users converge; connection consent gates authorization; accepted peers remain switchable; Peer 2 OFF removes B and ON restores B without reload.');
 }catch(e){await dump('MULTI USER FAILURE');throw e;}finally{for(const ctx of [ctxA,ctxB,ctxC])await ctx?.close().catch(()=>{});await browser.close().catch(()=>{});server.close();}

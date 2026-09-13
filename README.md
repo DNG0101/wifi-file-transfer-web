@@ -1,16 +1,16 @@
-# Wi-Fi File Transfer — version 4.8.0
+# Wi-Fi File Transfer — version 4.9.0
 
 [Open the app](https://dng0101.github.io/wifi-file-transfer-web/)
 
 ## Send a file
 
 1. Open the website on both devices. On the first visit, enter a device name in any language. Returning users keep their saved name; change it in Settings.
-2. Choose **Send Files** on one device and **Receive Files** on the other. Both sides show a QR, scanner, code and link. Either side can scan the other.
-3. Connect, then tap the receiver in **Available devices**. The app confirms that the other device can answer before showing the file picker. Either device can initiate the next transfer.
+2. Choose **Transfer** on either device. Both sides can use a QR, scanner, code or link to connect; no Send/Receive mode selection is needed.
+3. Connect, then choose **Send** beside the intended peer in **Available devices**. This opens **Choose files and send** for that peer. The app confirms that the other device can answer before showing the file picker. Either device can initiate the next transfer.
 4. Select files or a folder. The transfer request is sent automatically—there is no separate upload or Send step. The receiver accepts; no destination-folder picker is required.
 5. Wait for **Verified complete**. Verified files trigger normal browser downloads. If the browser blocks an automatic download, use the visible **Download** link. Your browser controls its Downloads folder, save prompts, and permission for multiple downloads.
 
-After connecting, **Remember device** asks for approval on both devices. On future visits, open the website on both devices and choose Send/Receive: remembered receivers appear without another code. Settings provides rename and forget.
+After connecting, **Remember device** asks for approval on both devices. On future visits, open the website on both devices and choose Transfer: remembered receivers appear without another code. Settings provides rename and forget.
 
 ## Large files, including 10 GB
 
@@ -99,3 +99,9 @@ Select a folder to send a single uncompressed ZIP64 download that preserves rela
 The code validates a maximum of 1 TiB for each transferred file or generated archive. That is a protocol limit, not a tested browser capacity guarantee. Receiver quota, free device space, download behavior, and keeping both devices awake still constrain actual transfers. The receiver removes temporary block fragments after verification, retaining only the verified temporary download copy until you confirm cleanup. Because websites cannot confirm final download success, cleanup is deliberately user-triggered.
 
 A large plain-file selection becomes a queue. Successful batches advance automatically; a decline, cancellation or error pauses remaining batches. Use Continue queue or Clear queued files. Queued source-file selections are held only while the sender page is open.
+
+## Refresh and temporary copies (4.9.0)
+
+Refreshing the page automatically deletes completed receiver temporary copies and their recovery records before connections restart. Incomplete transfers remain resumable, and files already saved in your device Downloads are unaffected. Finish browser downloads before refreshing: the website cannot verify whether a normal download has finished saving. Normal navigation or opening another page does not trigger this refresh cleanup. The manual Downloads saved cleanup button is also available.
+
+The home page has one Transfer entry point. Available devices show a distinct Send action; it checks the selected peer, opens the file-selection section, and sends the attachment to that peer after receiver approval.
