@@ -370,6 +370,7 @@ function transferBatches(files){
 
 
 
+
 const $ = id => document.getElementById(id);
 const number=(n,digits=0)=>new Intl.NumberFormat(undefined,{maximumFractionDigits:digits}).format(n);
 const fmt = n => n<1024?`${number(n)} B`:n<1048576?`${number(n/1024,1)} KB`:n<1073741824?`${number(n/1048576,1)} MB`:`${number(n/1073741824,2)} GB`;
@@ -649,7 +650,7 @@ async function openRoom(host,codeOverride,collisions=0) {
   try {
     await startupStorageReady;await networkReady;if(token!==attempt)return;
     await candidate.open(code,host,$('device-name').value.trim()||'My device',mode);if(token!==attempt)return;
-    $('room-code').value=code;$('room-info').hidden=false;renderInvite();
+    $('room-info').hidden=false;renderInvite();
     notice(active?.state==='reconnecting'?'Reconnected. Tap Resume to continue your saved transfer.':members.length?'Devices paired. On the sender, choose the receiver to enable file selection.':mode==='receive'?'Ready. Scan this invitation on the sending device.':'Ready. Scan the other device’s QR, or let it scan yours.');
   } catch(e) {
     if(token!==attempt)return;candidate.close();room=null;members=[];$('room-info').hidden=true;
@@ -693,7 +694,7 @@ function joinInvitation(value,requireLink=false) {
     const invite=readInvitation(value,location.href,requireLink);
     if(room&&!room.closed&&room.code===invite.code&&(room.host||['connecting','connected','reconnecting'].includes(room.state))) {notice(room.host?'This is your current invitation. Scan the QR on the other device, or let that device scan yours.':'You already joined this invitation. Choose the receiver on the sending device.');return;}
     if(invite.mode)setMode(invite.mode);else if(!mode)setMode('send');
-    $('room-code').value=invite.code;debug('Valid invitation read; connecting to its creator.');void openRoom(false,invite.code);
+    debug('Valid invitation read; connecting to its creator.');void openRoom(false,invite.code);
   } catch(e){notice(e.message||'Invalid invitation. Enter the code instead.',true);}
 }
 const scanner=new Scanner($('scanner-video'),value=>{ $('scanner-dialog').close();joinInvitation(value,true);},message=>{$('scanner-dialog').close();notice(message,true);});
@@ -720,6 +721,7 @@ async function selectFiles(e){
 }
 $('file-picker').onchange=$('folder-picker').onchange=selectFiles;
 $('create-room').onclick=()=>openRoom(true);$('join-room').onclick=()=>joinInvitation($('room-code').value);
+$('room-code').value='';
 $('room-code').onkeydown=e=>{if(e.key==='Enter')$('join-room').click();};
 $('retry-room').onclick=()=>{if(lastAttempt)openRoom(lastAttempt.host,lastAttempt.code);};
 $('leave-room').onclick=$('cancel-connection').onclick=leaveRoom;
