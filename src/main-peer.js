@@ -14,8 +14,8 @@ function dispatchIncoming(conn){
 
 export class MainPeerManager{
  constructor(config={}){
-  const {uuid,name,PeerClass=Peer,options=peerOptions(),onIncoming,onConnectionRequest,onConnected=()=>{},onDisconnected=()=>{},onState=()=>{},locks=navigator.locks}=config;
-  Object.assign(this,{uuid,name,PeerClass,options,onIncoming:onIncoming||(()=>{}),onConnectionRequest:onConnectionRequest||(()=>false),onConnected,onDisconnected,onState,locks});this.authorized=new Map();this.connections=new Map();
+  const {uuid,name,PeerClass=Peer,options=peerOptions(),onIncoming,onConnectionRequest,onCancel=()=>false,onConnected=()=>{},onDisconnected=()=>{},onState=()=>{},locks=navigator.locks}=config;
+  Object.assign(this,{uuid,name,PeerClass,options,onIncoming:onIncoming||(()=>{}),onConnectionRequest:onConnectionRequest||(()=>false),onCancel,onConnected,onDisconnected,onState,locks});this.authorized=new Map();this.connections=new Map();
   this.acceptIncoming=typeof onIncoming==='function';
   this.id=`wftp-main-${uuid}`;this.enabled=false;this.leader=false;
  }
@@ -61,6 +61,11 @@ export class MainPeerManager{
     this.onDisconnected(member);
   };
   conn.on('close',disconnected);conn.on('error',()=>{conn.close();disconnected();});
+  conn.on('data',message=>{
+    if(message?.type!=='transfer-cancel'||typeof message.id!=='string'||message.id.length>64)return;
+    const cancelled=this.onCancel(message.id,member)===true;
+    if(conn.open)conn.send({type:'transfer-cancelled',id:message.id,cancelled});
+  });
   this.onConnected(member);
  }
  accept(conn){
@@ -123,6 +128,17 @@ export class MainPeerManager{
   const peer=shared.peer||this.peer,id=safe(remoteId);if(!peer||peer.disconnected||!id||id===peer.id)return Promise.reject(Error('Main peer is not ready for this device.'));
   const conn=peer.connect(id,{reliable:true,serialization:'raw',metadata:{kind:'connection-probe',deviceId:this.uuid,name:this.name.slice(0,48)}});
   return new Promise((resolve,reject)=>{let done=false;const finish=error=>{if(done)return;done=true;clearTimeout(timer);if(error){conn.close();reject(error);}else resolve(conn);};const timer=setTimeout(()=>finish(Error('File connection timed out.')),timeout);conn.on('data',value=>value==='ready'&&finish());conn.on('error',()=>finish(Error('Could not open the file connection.')));conn.on('close',()=>finish(Error('The file connection closed early.')));});
+ }
+ cancelTransfer(remoteId,id){
+  const member=[...this.authorized.values()].find(m=>m.id===remoteId),conn=member&&this.connections.get(member.deviceId);
+  if(!conn?.open)return Promise.resolve(false);
+  return new Promise(resolve=>{
+   let done=false;
+   const finish=value=>{if(done)return;done=true;clearTimeout(timer);conn.off?.('data',receive);resolve(value);};
+   const receive=message=>{if(message?.type==='transfer-cancelled'&&message.id===id)finish(message.cancelled===true);};
+   const timer=setTimeout(()=>finish(false),5000);
+   conn.on('data',receive);try{conn.send({type:'transfer-cancel',id});}catch{finish(false);}
+  });
  }
  setName(name){this.name=name;}
  async stop(){

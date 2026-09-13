@@ -24,7 +24,7 @@ const emptyFile=()=>({next:0,hashes:[],checkpoint:null,complete:false});
 export function encodeChunk(id,file,block,offset,payload) {
   const out=new Uint8Array(HEADER+payload.byteLength),v=new DataView(out.buffer);
   v.setUint32(0,0x57465433);const hex=id.replace(/-/g,'');for(let n=0;n<16;n++)out[4+n]=parseInt(hex.slice(n*2,n*2+2),16);
-  v.setUint32(20,file);v.setUint32(24,block);v.setUint32(28,offset);v.setUint32(32,payload.byteLength);out.set(new Uint8Array(payload),HEADER);return out.buffer;
+  v.setUint32(20,file);v.setUint32(24,block);v.setUint32(28,offset);v.setUint32(32,payload.byteLength);out.set(payload instanceof Uint8Array?payload:new Uint8Array(payload),HEADER);return out.buffer;
 }
 export function decodeChunk(raw,id) {
   if(!(raw instanceof ArrayBuffer)||raw.byteLength<=HEADER||raw.byteLength>MAX_FRAME)throw Error('Malformed binary frame.');
@@ -37,7 +37,7 @@ export class BlockTransfer {
     this.options=options;this.store=options.store||records;this.Storage=options.Storage||BlockStorage;
     this.direction=options.files?'send':'receive';this.files=options.files;
     this.record=options.record;this.manifest=this.record?.manifest;this.id=this.record?.transferId||options.id||(this.files?crypto.randomUUID():null);
-    this.token=this.record?.token||(this.files?secret():null);this.state='connecting';this.epoch=0;this.waiters=[];
+    this.token=this.record?.token||(this.files?secret():null);this.state='connecting';this.epoch=0;this.waiters=[];this.tasks=new Set();
     this.localPaused=false;this.peerPaused=false;this.lastActivity=Date.now();this.lastUI=0;this.samples=[];this.bytes=0;this.total=0;
     this.attach(conn);
     this.heartbeat=setInterval(()=>{
@@ -65,6 +65,7 @@ export class BlockTransfer {
     if(old&&old!==conn)old.close();this.rejectWaiters(new Interrupted('Reconnecting'));
     if(this.state==='reconnecting')this.transition('connecting');this.lastActivity=Date.now();
     conn.on('data',raw=>{
+      if(this.handleCancellation(raw,conn))return;
       if(epoch!==this.epoch||this.terminal())return;
       this.lastActivity=Date.now();
       try {
@@ -88,7 +89,34 @@ export class BlockTransfer {
     });
     conn.on('close',()=>{if(epoch===this.epoch)this.interrupted('Connection interrupted. Verified blocks are preserved.');});
     conn.on('error',()=>{if(epoch===this.epoch)this.interrupted('Could not reach the other device. Verified progress is saved.');});
-    if(this.files){const start=()=>this.run(epoch).catch(e=>this.handleError(e));if(conn.open)queueMicrotask(start);else conn.on('open',start);}
+    if(this.files){const start=()=>this.trackTask(this.run(epoch).catch(e=>this.handleError(e)));if(conn.open)queueMicrotask(start);else conn.on('open',start);}
+  }
+  trackTask(promise){this.tasks.add(promise);promise.then(()=>this.tasks.delete(promise),()=>this.tasks.delete(promise));return promise;}
+  handleCancellation(raw,conn){
+    if(conn!==this.conn||typeof raw!=='string'||raw.length>MAX_CONTROL)return false;
+    let message;try{message=JSON.parse(raw);}catch{return false;}
+    if(!message||message.v!==VERSION||!UUID.test(message.id)||this.id&&message.id!==this.id)return false;
+    if(message.type==='cancel-ack'){this.finishCancellation?.(true);return true;}
+    if(message.type!=='cancel')return false;
+    if(!this.id)this.id=message.id;
+    if(!this.terminal())this.fail('Transfer cancelled by the other device.','cancelled',false);
+    if(conn.open)try{conn.send(JSON.stringify({v:VERSION,id:this.id,type:'cancel-ack'}));}catch{}
+    return true;
+  }
+  beginCancellation(){
+    const conn=this.conn;let settled=false;
+    const sendCancel=()=>{if(!settled&&conn.open)try{conn.send(JSON.stringify({v:VERSION,id:this.id,type:'cancel',reason:'Transfer cancelled.'}));}catch{}};
+    this.cancelAcknowledged=new Promise(resolve=>{
+      const timer=setTimeout(()=>this.finishCancellation(false),15000);
+      this.finishCancellation=confirmed=>{
+        if(settled)return;settled=true;clearTimeout(timer);conn.off?.('open',sendCancel);resolve(confirmed);
+        this.detail=confirmed?'Transfer cancelled on both devices.':'Cancelled locally. The other device could not be reached.';
+        this.emit(true);conn?.close();
+      };
+    });
+    conn.on('open',sendCancel);sendCancel();
+    // A separate approved control channel bypasses any queued file frames.
+    Promise.resolve().then(()=>this.options.onCancel?.(this.id)).then(confirmed=>{if(confirmed===true)this.finishCancellation(true);}).catch(()=>{});
   }
   guard(epoch){if(this.terminal())throw new Interrupted('Transfer stopped.');if(epoch!==this.epoch||!this.conn.open)throw new Interrupted('Connection interrupted.');}
   handleError(e){if(e instanceof Interrupted)return;this.fail(friendlyStorageError(e));}
@@ -143,16 +171,20 @@ export class BlockTransfer {
         for(let b=state.next;b<count;b++) {
           await this.writable(epoch);
           const bytes=await file.slice(b*BLOCK_SIZE,Math.min(file.size,(b+1)*BLOCK_SIZE)).arrayBuffer();this.guard(epoch);
-          const digest=await blockHash(bytes);let attempts=0,ack;
+          const checkpoint=hash.update(bytes);checkpoint.catch(()=>{});
+          const digest=await blockHash(bytes);this.guard(epoch);let attempts=0,ack;
           do {
             await this.writable(epoch);
             await this.request('block-start',{file:f,block:b,size:bytes.byteLength,hash:digest},'ready',epoch);
-            for(let offset=0;offset<bytes.byteLength;offset+=transport) {await this.writable(epoch);this.conn.send(encodeChunk(this.id,f,b,offset,bytes.slice(offset,offset+transport)));}
+            for(let offset=0;offset<bytes.byteLength;offset+=transport) {
+              if(this.localPaused||this.peerPaused||(this.conn.dataChannel?.bufferedAmount||0)>=1024*1024)await this.writable(epoch);
+              this.guard(epoch);this.conn.send(encodeChunk(this.id,f,b,offset,new Uint8Array(bytes,offset,Math.min(transport,bytes.byteLength-offset))));
+            }
             ack=await this.request('block-end',{file:f,block:b},['block-ack','block-nack'],epoch);
             if(ack.file!==f||ack.block!==b)throw Error('Acknowledgement belongs to another block.');
           }while(ack.type==='block-nack'&&++attempts<3);
           if(ack.type!=='block-ack'||ack.hash!==digest)throw Error('A block repeatedly failed integrity checks. Retry on a stable connection.');
-          state.checkpoint=await hash.update(bytes);state.hashes[b]=digest;state.next=b+1;this.record.updated=Date.now();await this.store.put(this.record);this.emit();
+          state.checkpoint=await checkpoint;this.guard(epoch);state.hashes[b]=digest;state.next=b+1;this.record.updated=Date.now();await this.store.put(this.record);this.emit();
         }
         const digest=await hash.digest();this.guard(epoch);this.verifiedBytes=0;this.transition('verifying','All blocks received. Waiting for the receiver to verify the saved file…');
         const result=await this.request('file-finish',{file:f,hash:digest},'file-complete',epoch);
@@ -215,7 +247,8 @@ export class BlockTransfer {
     if(!block||frame.file!==block.file||frame.block!==block.index||frame.offset!==block.received||frame.offset+frame.bytes.length>block.data.length)throw Error('Out-of-order or unexpected file data.');
     block.data.set(frame.bytes,frame.offset);block.received+=frame.bytes.length;
   }
-  async accept(destination) {
+  accept(destination){return this.trackTask(this.acceptDestination(destination));}
+  async acceptDestination(destination) {
     if(this.state!=='offered')return;const epoch=this.epoch;this.transition('preparing','Preparing persistent storage…');
     try {
       if(this.options.requireDirectory&&(destination?.storage!=='directory'||!destination.directory))throw Error('Choose a device folder. Browser-stored file contents are disabled.');
@@ -233,13 +266,24 @@ export class BlockTransfer {
     this.rejectWaiters(new Interrupted(detail));this.transition('reconnecting',detail);this.options.onInterrupted?.(this);
   }
   decline(){this.fail('Receiver declined this transfer.','declined');}
-  cancel(){this.fail('Transfer cancelled. Partial files are being removed.','cancelled');}
+  cancel(notify=true){this.fail('Transfer cancelled. Partial files are being removed.','cancelled',notify);}
   fail(detail,state='failed',notify=true) {
     if(this.terminal())return;
-    if(notify&&this.id&&this.conn?.open)try{this.send(state==='declined'?'reject':state==='cancelled'?'cancel':'error',{reason:detail.slice(0,200)});}catch{}
-    this.epoch++;this.block=null;this.rejectWaiters(new Interrupted(detail));clearInterval(this.heartbeat);
-    if(this.record){this.record.state=state;void this.store.put(this.record).catch(()=>{});}
-    this.transition(state,detail);setTimeout(()=>this.conn.close(),300);
-    if(state==='cancelled')void this.queue.finally(async()=>{await this.storage?.cleanup();if(this.record)await this.store.remove(this.record.id);}).catch(()=>{});
+    if(notify&&state!=='cancelled'&&this.id&&this.conn?.open)try{this.send(state==='declined'?'reject':'error',{reason:detail.slice(0,200)});}catch{}
+    this.epoch++;this.block=null;this.rejectWaiters(new Interrupted('Transfer stopped'));clearInterval(this.heartbeat);
+    let persisted=Promise.resolve();
+    if(this.record){this.record.state=state;persisted=this.store.put(this.record).catch(()=>{});}
+    if(state==='cancelled'||state==='declined'){
+      this.cleanupPromise=(async()=>{
+        await Promise.allSettled([this.queue,...this.tasks,persisted]);
+        await this.storage?.cleanup();
+        if(this.record)await this.store.remove(this.record.id);
+      })();
+      this.cleanupPromise.catch(error=>this.options.onCleanupError?.(error));
+    }
+    // Set the acknowledgement listener before publishing the terminal UI state.
+    if(state==='cancelled'&&notify)this.beginCancellation();
+    this.transition(state,detail);
+    if(state!=='cancelled'||!notify){const conn=this.conn;setTimeout(()=>conn.close(),state==='cancelled'?5000:1000);}
   }
 }

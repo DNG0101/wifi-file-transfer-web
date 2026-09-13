@@ -1,4 +1,4 @@
-# Wi-Fi File Transfer — version 4.9.0
+# Wi-Fi File Transfer — version 4.10.0
 
 [Open the app](https://dng0101.github.io/wifi-file-transfer-web/)
 
@@ -6,7 +6,7 @@
 
 1. Open the website on both devices. On the first visit, enter a device name in any language. Returning users keep their saved name; change it in Settings.
 2. Choose **Transfer** on either device. Both sides can use a QR, scanner, code or link to connect; no Send/Receive mode selection is needed.
-3. Connect, then choose **Send** beside the intended peer in **Available devices**. This opens **Choose files and send** for that peer. The app confirms that the other device can answer before showing the file picker. Either device can initiate the next transfer.
+3. Connect, then choose **Send** beside the intended peer in **Available devices**. This opens **Choose files and send** for that peer. The app confirms that the other device can answer before showing the file picker. Either device can send and receive simultaneously. Choose Send beside another connected device to send to multiple peers at once. Use each transfer card’s controls to pause, resume or cancel that transfer.
 4. Select files or a folder. The transfer request is sent automatically—there is no separate upload or Send step. The receiver accepts; no destination-folder picker is required.
 5. Wait for **Verified complete**. Verified files trigger normal browser downloads. If the browser blocks an automatic download, use the visible **Download** link. Your browser controls its Downloads folder, save prompts, and permission for multiple downloads.
 
@@ -96,12 +96,24 @@ Names accept Unicode, normalize to NFC, and use automatic text direction for rig
 
 Select a folder to send a single uncompressed ZIP64 download that preserves relative paths and UTF-8 filenames. Archive payloads are read on demand in blocks of at most 8 MiB; the sender does not create a complete temporary ZIP or load the entire folder into memory. ZIP64 supports size fields beyond 4 GiB. Browser file pickers do not expose empty subfolders. Resume an interrupted folder by reselecting the same original folder. Archive entry ordering and timestamps are deterministic.
 
-The code validates a maximum of 1 TiB for each transferred file or generated archive. That is a protocol limit, not a tested browser capacity guarantee. Receiver quota, free device space, download behavior, and keeping both devices awake still constrain actual transfers. The receiver removes temporary block fragments after verification, retaining only the verified temporary download copy until you confirm cleanup. Because websites cannot confirm final download success, cleanup is deliberately user-triggered.
+The code validates a maximum of 1 TiB for each transferred file or generated archive. That is a protocol limit, not a tested browser capacity guarantee. Receiver quota, free device space, download behavior, and keeping both devices awake still constrain actual transfers. The receiver removes temporary block fragments after verification, retaining only the verified temporary download copy until page refresh or manual cleanup. Finish browser downloads before refreshing; the website cannot confirm final download success.
 
-A large plain-file selection becomes a queue. Successful batches advance automatically; a decline, cancellation or error pauses remaining batches. Use Continue queue or Clear queued files. Queued source-file selections are held only while the sender page is open.
+A large plain-file selection becomes a queue. Successful batches advance automatically; a decline or error pauses that peer's remaining batches. Cancelling drops the remaining batches for that outgoing peer; choose new files to send again. Use Continue queue or Clear queued files. Queued source-file selections are held only while the sender page is open.
 
 ## Refresh and temporary copies (4.9.0)
 
 Refreshing the page automatically deletes completed receiver temporary copies and their recovery records before connections restart. Incomplete transfers remain resumable, and files already saved in your device Downloads are unaffected. Finish browser downloads before refreshing: the website cannot verify whether a normal download has finished saving. Normal navigation or opening another page does not trigger this refresh cleanup. The manual Downloads saved cleanup button is also available.
 
 The home page has one Transfer entry point. Available devices show a distinct Send action; it checks the selected peer, opens the file-selection section, and sends the attachment to that peer after receiver approval.
+
+## Simultaneous peers and cancellation (4.10.0)
+
+Each connected peer has an independent outgoing queue. Different peers run simultaneously; batches for the same peer run in order. Incoming transfers have separate approval requests, and both sides can send and receive at the same time. Pause, Resume and Cancel controls belong to individual transfer cards.
+
+Cancellation stops work locally immediately and sends a cancellation request over the file channel plus the approved connection (or authenticated remembered/room message path). Confirmation is awaited before closing the local channel. If the peer is unreachable, the interface reports cancellation as local only after 15 seconds. Cancelling does not remove the underlying approved peer connection. New files selected for that peer wait for confirmation or timeout, then start a fresh transfer ID.
+
+Cancellation cleanup waits for outstanding receive, storage-opening, and sender-record operations before removing data. Delayed writes cannot recreate a cancelled record. Late channels for cancelled transfer IDs are rejected for the current page session.
+
+The sender avoids a redundant copy for each network frame and overlaps incremental whole-file hashing with block hashing and transport. Frame-size negotiation, native backpressure, per-block verification, durable acknowledgements, and final SHA-256 verification remain enabled. Actual throughput depends on the network route, storage, CPU and browser; no speed multiplier or physical 1 TiB transfer has been verified.
+
+See [4.10 validation](docs/validation-4.10.md) for the tested scenarios and execution limits.

@@ -104,7 +104,335 @@ async function Xe(store,operation,write=false) {
   });
 }
 var M0={get:t=>Xe("transfers",e=>e.get(t)),put:t=>Xe("transfers",e=>e.put(t),!0),list:()=>Xe("transfers",t=>t.getAll()),remove:t=>Xe("transfers",e=>e.delete(t),!0)},K0={get:t=>Xe("devices",e=>e.get(t)),put:t=>Xe("devices",e=>e.put(t),!0),list:()=>Xe("devices",t=>t.getAll()),remove:t=>Xe("devices",e=>e.delete(t),!0)};async function qi(t=Date.now()){let e="wft-last-storage-cleanup",r=0;try{r=Number(localStorage.getItem(e))||0}catch{}if(r&&t-r<vc)return!1;let x=new Set(["wft-device-name","wft-device-id","app_device_uuid","wft-device-id-version","wft-device-id-updated","wft-online-enabled",e]);try{let n=new Map;for(let i of x)if(i!==e){let o=localStorage.getItem(i);o!==null&&n.set(i,o)}localStorage.clear();for(let[i,o]of n)localStorage.setItem(i,o);localStorage.setItem(e,String(t))}catch{}try{let s=await wftDurableConnection.transaction(["transfers","blocks","settings"],"readwrite");await new Promise((i,o)=>{s.objectStore("transfers").clear(),s.objectStore("blocks").clear(),s.objectStore("settings").clear(),s.oncomplete=i,s.onerror=()=>o(s.error),s.onabort=()=>o(s.error||Error("Cleanup interrupted."))})}catch{}try{let n=await navigator.storage?.getDirectory?.();if(n)for await(let[i]of n.entries())i.startsWith(".wft-")&&await n.removeEntry(i,{recursive:!0}).catch(()=>{})}catch{}try{indexedDB.deleteDatabase("wft-presence-v1")}catch{}return!0}function Tx(t){let e=String(t||"").replace(/\\/g,"/").split("/");if(e.length>20||e.some(r=>!r||r==="."||r===".."||r.length>240)||String(t).startsWith("/"))throw Error("Unsafe folder path.");return e.map(ur).join("/")}function Wi(t){return t?.name==="QuotaExceededError"?"Storage is full. Free space, then retry.":["NotAllowedError","SecurityError"].includes(t?.name)?"Storage permission was denied. Choose the destination again and allow access.":t?.message||"Could not write the file."}async function yc(t,e){let r=e.lastIndexOf("."),x=r>0?e.slice(0,r):e,n=r>0?e.slice(r):"";for(let i=0;i<1e4;i++){let o=i?`${x} (${i})${n}`:e;try{await t.getFileHandle(o)}catch(s){if(s.name==="NotFoundError")return{name:o,handle:await t.getFileHandle(o,{create:!0})};throw s}}throw Error("Too many files with the same name. Choose another folder.")}var I0=class t{constructor(e,r,x){this.record=e,this.root=r,this.staging=x}static async open(e){let r,x;if(e.storage==="directory"){if(r=e.directory,!r)throw Error("Choose the original destination folder to resume.");if(r.queryPermission&&await r.queryPermission({mode:"readwrite"})!=="granted")throw Error("Allow access to the original destination folder before resuming.")}else e.storage==="opfs"&&(r=await navigator.storage.getDirectory());return r&&(x=await r.getDirectoryHandle(".wft-"+e.transferId,{create:!0})),new t(e,r,x)}key(e,r){return`${this.record.transferId}:${e}:${r}`}async write(e,r,x){if(this.staging){let i=await(await this.staging.getFileHandle(`f${e}-b${r}.part`,{create:!0})).createWritable();try{await i.write(x),await i.close()}catch(o){throw await i.abort().catch(()=>{}),o}}else await Xe("blocks",n=>n.put({id:this.key(e,r),data:new Blob([x])}),!0)}async read(e,r){if(this.staging)return(await(await this.staging.getFileHandle(`f${e}-b${r}.part`)).getFile()).arrayBuffer();let x=await Xe("blocks",n=>n.get(this.key(e,r)));if(!x)throw Error("A temporary transfer block is missing. Retry the transfer.");return x.data.arrayBuffer()}async removeBlock(e,r){this.staging?await this.staging.removeEntry(`f${e}-b${r}.part`).catch(()=>{}):await Xe("blocks",x=>x.delete(this.key(e,r)),!0)}async verifyPrefix(e,r){for(let x=0;x<r.next;x++)try{let n=await this.read(e,x);if(await T0(n)!==r.hashes[x])return x}catch{return x}return r.next}async finalize(e,r,x,n=()=>{},i=()=>!1){let o=this.record.manifest[e],s,a,c=[],d=new S0;try{if(this.record.storage==="directory"){let l=this.root,f=Tx(o.path||o.name).split("/");for(let v of f.slice(0,-1))l=await l.getDirectoryHandle(v,{create:!0});s=await yc(l,f.at(-1)),a=await s.handle.createWritable()}else if(this.staging)s={name:o.name,handle:await this.staging.getFileHandle(`verified-${e}`,{create:!0})},a=await s.handle.createWritable();else if(o.size>256*1024*1024)throw Error("This browser needs a download folder or OPFS for large files.");for(let l=0;l<r.next;l++){if(i())throw Error("Verification cancelled.");let f=await this.read(e,l);if(await T0(f)!==r.hashes[l])throw Error("A temporary block changed. Retry the transfer.");await d.update(f),a?await a.write(f):c.push(f),n(Math.min(o.size,(l+1)*$e))}if(await d.digest()!==x)throw Error("Final file integrity failed. Nothing has been marked complete.");if(i())throw Error("Verification cancelled.");if(a&&await a.close(),i())throw Error("Verification cancelled before completion was acknowledged.");if(r.digest=x,r.complete=!0,r.outputName=s?.name,r.outputHandle=s?.handle,await M0.put(this.record),this.staging)for(let l=0;l<r.next;l++)await this.removeBlock(e,l);return this.record.storage==="directory"?{savedName:s.name}:{blob:s?await s.handle.getFile():new Blob(c,{type:"application/octet-stream"})}}catch(l){throw await a?.abort().catch(()=>{}),l}finally{d.close()}}async completedFile(e){let r=this.record.files[e];return this.record.storage==="directory"?{savedName:r.outputName}:r.outputHandle?{blob:await r.outputHandle.getFile()}:this.finalize(e,r,r.digest)}async cleanup(){if(this.staging)await this.root.removeEntry(".wft-"+this.record.transferId,{recursive:!0}).catch(error=>{if(error.name!=="NotFoundError")throw error;});else for(let e=0;e<this.record.files.length;e++)for(let r=0;r<this.record.files[e].next;r++)await this.removeBlock(e,r)}};var Gi=3,R0=36,Qi=64*1024,Xi=48*1024,kc=/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,Ix=/^[0-9a-f]{64}$/,Ki=new Set(["complete","failed","declined","cancelled"]),bc={connecting:["waiting","offered","preparing","reconnecting"],waiting:["transferring","paused","reconnecting"],offered:["preparing","reconnecting"],preparing:["transferring","paused","reconnecting","verifying"],transferring:["paused","verifying","reconnecting"],paused:["transferring","verifying","reconnecting"],reconnecting:["connecting","waiting","offered","preparing","transferring","paused"],verifying:["transferring","paused","reconnecting"]},n0=class extends Error{},wc=()=>Array.from(crypto.getRandomValues(new Uint8Array(32)),t=>t.toString(16).padStart(2,"0")).join("");function J0(t){if(!Array.isArray(t)||!t.length||t.length>200)throw Error("Choose between 1 and 200 files per transfer.");let e=t.map(r=>{if(typeof r.name!="string"||r.name.length>240||!Number.isSafeInteger(r.size)||r.size<0||r.size>zi)throw Error("Invalid file metadata or file larger than the supported 1 TB limit.");let x=r.webkitRelativePath||r.path||r.name;return{name:ur(r.name),path:Tx(x),size:r.size,type:typeof r.type=="string"?r.type.slice(0,120):"",lastModified:Number.isSafeInteger(r.lastModified)?r.lastModified:0}});if(new TextEncoder().encode(JSON.stringify(e)).length>32*1024)throw Error("Too many filenames in one batch. Select fewer files.");return e}function Ji(t,e){return JSON.stringify(t)===JSON.stringify(e)}var Yi=()=>({next:0,hashes:[],checkpoint:null,complete:!1});function Pc(t,e,r,x,n){let i=new Uint8Array(R0+n.byteLength),o=new DataView(i.buffer);o.setUint32(0,1464226867);let s=t.replace(/-/g,"");for(let a=0;a<16;a++)i[4+a]=parseInt(s.slice(a*2,a*2+2),16);return o.setUint32(20,e),o.setUint32(24,r),o.setUint32(28,x),o.setUint32(32,n.byteLength),i.set(new Uint8Array(n),R0),i.buffer}function _c(t,e){if(!(t instanceof ArrayBuffer)||t.byteLength<=R0||t.byteLength>Qi)throw Error("Malformed binary frame.");let r=new DataView(t),x=Array.from(new Uint8Array(t,4,16),n=>n.toString(16).padStart(2,"0")).join("");if(r.getUint32(0)!==1464226867||x!==e.replace(/-/g,"")||r.getUint32(32)!==t.byteLength-R0)throw Error("File data belongs to a different transfer.");return{file:r.getUint32(20),block:r.getUint32(24),offset:r.getUint32(28),bytes:new Uint8Array(t,R0)}}var Er=class{constructor(e,r={}){this.options=r,this.store=r.store||M0,this.Storage=r.Storage||I0,this.direction=r.files?"send":"receive",this.files=r.files,this.record=r.record,this.manifest=this.record?.manifest,this.id=this.record?.transferId||r.id||(this.files?crypto.randomUUID():null),this.token=this.record?.token||(this.files?wc():null),this.state="connecting",this.epoch=0,this.waiters=[],this.localPaused=!1,this.peerPaused=!1,this.lastActivity=Date.now(),this.lastUI=0,this.samples=[],this.bytes=0,this.total=0,this.attach(e),this.heartbeat=setInterval(()=>{if(this.terminal())return;if(this.conn?.open&&this.id)try{this.send("ping")}catch{}let x=["offered","waiting","preparing","verifying"].includes(this.state)?18e4:45e3;!this.localPaused&&!this.peerPaused&&this.state!=="reconnecting"&&Date.now()-this.lastActivity>x&&this.interrupted("Connection stopped responding. Verified progress is saved.")},1e4)}terminal(){return Ki.has(this.state)}transition(e,r=""){if(!(this.terminal()&&e!==this.state)){if(e!==this.state&&!Ki.has(e)&&!bc[this.state]?.includes(e))throw Error(`Invalid transfer state: ${this.state} to ${e}`);this.state=e,this.detail=r,this.emit(!0)}}emit(e=!1){let r=Date.now();if(!e&&r-this.lastUI<200)return;this.lastUI=r;let x=this.record?this.record.files.reduce((o,s,a)=>o+Math.min(this.manifest[a].size,s.next*$e),0):0;this.bytes=x,this.samples.push([r,x]),this.samples=this.samples.filter(o=>r-o[0]<5e3);let n=this.samples[0],i=this.samples.length>1&&r>n[0]&&!["paused","reconnecting","verifying"].includes(this.state)?Math.max(0,(x-n[1])*1e3/(r-n[0])):0;this.options.onUpdate?.({id:this.id,state:this.state,detail:this.detail||"",direction:this.direction,files:this.manifest||[],bytes:x,total:this.total,speed:i,eta:i?(this.total-x)/i:null,remotePaused:this.peerPaused,localPaused:this.localPaused,fileIndex:this.fileIndex||0,verifiedBytes:this.verifiedBytes||0})}attach(e){let r=this.conn,x=this.queue;this.epoch++;let n=this.epoch;if(this.conn=e,this.queue=x?.catch(()=>{})||Promise.resolve(),this.queuedBytes=0,this.block=null,this.helloSeen=!1,r&&r!==e&&r.close(),this.rejectWaiters(new n0("Reconnecting")),this.state==="reconnecting"&&this.transition("connecting"),this.lastActivity=Date.now(),e.on("data",i=>{if(!(n!==this.epoch||this.terminal())){this.lastActivity=Date.now();try{if(typeof i=="string"){if(i.length>Xi)throw Error("Control message too large.");let o=JSON.parse(i);if(!o||o.v!==Gi||typeof o.type!="string"||!kc.test(o.id)||this.id&&o.id!==this.id)throw Error("Invalid transfer message.");if(o.type==="ping"){this.send("pong");return}if(o.type==="pong")return;if(o.type==="pause"||o.type==="resume"){this.peerPaused=o.type==="pause",this.refreshPause();return}if(o.type==="cancel"||o.type==="reject"||o.type==="error"){this.fail(typeof o.reason=="string"?o.reason.slice(0,200):"The other device stopped the transfer.",o.type==="reject"?"declined":o.type==="cancel"?"cancelled":"failed",!1);return}if(this.direction==="send"){if(o.type==="verify-progress"){this.verifiedBytes=o.bytes,this.emit();return}let s=this.waiters.find(a=>a.types.includes(o.type));if(!s)throw Error("Unexpected transfer acknowledgement.");this.waiters.splice(this.waiters.indexOf(s),1),s.resolve(o);return}this.queue=this.queue.then(()=>(this.guard(n),this.receiveControl(o,n))).catch(s=>this.handleError(s))}else{let o=i.byteLength||i.size||0;if(this.queuedBytes+=o,this.queuedBytes>$e+2*1024*1024)throw Error("Peer sent too much data without acknowledgement.");this.queue=this.queue.then(async()=>{try{this.guard(n);let s=i instanceof Blob?await i.arrayBuffer():i;this.guard(n),this.receiveBinary(s)}finally{n===this.epoch&&(this.queuedBytes-=o)}}).catch(s=>this.handleError(s))}}catch(o){this.handleError(o)}}}),e.on("close",()=>{n===this.epoch&&this.interrupted("Connection interrupted. Verified blocks are preserved.")}),e.on("error",()=>{n===this.epoch&&this.interrupted("Could not reach the other device. Verified progress is saved.")}),this.files){let i=()=>this.run(n).catch(o=>this.handleError(o));e.open?queueMicrotask(i):e.on("open",i)}}guard(e){if(this.terminal())throw new n0("Transfer stopped.");if(e!==this.epoch||!this.conn.open)throw new n0("Connection interrupted.")}handleError(e){e instanceof n0||this.fail(Wi(e))}send(e,r={}){if(!this.conn?.open||!this.id)throw new n0("Connection unavailable.");let x=JSON.stringify({v:Gi,id:this.id,type:e,...r});if(new TextEncoder().encode(x).length>Xi)throw Error("Transfer metadata is too large. Select fewer files.");this.conn.send(x)}rejectWaiters(e){for(let r of this.waiters)r.reject(e);this.waiters=[]}request(e,r,x,n){return this.guard(n),new Promise((i,o)=>{let s=setTimeout(()=>{this.waiters=this.waiters.filter(c=>c!==a),o(Error("The other device did not respond. Your progress is saved."))},e==="file-finish"?36e5:18e4),a={types:Array.isArray(x)?x:[x],resolve:c=>{clearTimeout(s),i(c)},reject:c=>{clearTimeout(s),o(c)}};this.waiters.push(a);try{this.send(e,r)}catch(c){this.waiters.pop(),a.reject(c)}})}async writable(e){for(;this.localPaused||this.peerPaused;)this.guard(e),await new Promise(x=>setTimeout(x,100));this.guard(e);let r=this.conn.dataChannel;if(!(!r||r.bufferedAmount<1024*1024))return r.bufferedAmountLowThreshold=256*1024,await new Promise((x,n)=>{let i=()=>{clearTimeout(a),r.removeEventListener("bufferedamountlow",o),r.removeEventListener("close",s),x()},o=()=>{r.bufferedAmount<=r.bufferedAmountLowThreshold&&i()},s=()=>{i(),n(new n0("Connection closed"))},a=setTimeout(i,1e3);r.addEventListener("bufferedamountlow",o),r.addEventListener("close",s),o()}),this.writable(e)}async run(e){if(this.manifest=J0(this.files),this.total=this.manifest.reduce((o,s)=>o+s.size,0),this.record||(this.record={id:"send:"+this.id,transferId:this.id,token:this.token,direction:"send",sourceFolder:!!this.files[0]?.archiveFolder,manifest:this.manifest,files:this.manifest.map(Yi),senderId:this.options.senderId||"local",receiverId:this.options.receiverId||"remote",created:Date.now(),state:"waiting"}),!Ji(this.manifest,this.record.manifest))throw Error("Select the same original files, with matching names, sizes, and modification dates, to resume.");this.guard(e);let r=this.request("hello",{token:this.token,manifest:this.manifest,senderId:this.record.senderId,receiverId:this.record.receiverId,paused:this.localPaused},"accept",e);this.transition("waiting");let x=await r;if(!Array.isArray(x.files)||x.files.length!==this.files.length)throw Error("Invalid saved transfer state.");await this.store.put(this.record),this.guard(e),this.peerPaused=!!x.paused,this.transition(this.localPaused||this.peerPaused?"paused":"transferring");let n=this.conn.peerConnection?.sctp?.maxMessageSize,i=Math.min(Qi,Number.isFinite(n)&&n>R0?n:16*1024)-R0;for(let o=0;o<this.files.length;o++){this.fileIndex=o;let s=this.files[o],a=this.record.files[o],c=x.files[o],d=Math.ceil(s.size/$e);if(!Number.isInteger(c.next)||c.next<0||c.next>d)throw Error("Invalid saved block offset.");let l=a.checkpoint;if(c.next!==a.next||this.options.reselected){let v=new S0;try{for(let y=0;y<c.next;y++){this.guard(e);let P=await s.slice(y*$e,Math.min(s.size,(y+1)*$e)).arrayBuffer(),M=await T0(P);if(a.hashes[y]&&a.hashes[y]!==M)throw Error("The selected source file changed. Choose the original file or start a new transfer.");a.hashes[y]=M,l=await v.update(P)}}finally{v.close()}c.next||(l=null)}if(c.next&&c.lastHash!==a.hashes[c.next-1])throw Error("Saved source and receiver progress do not match.");a.next=c.next,a.checkpoint=l,a.complete=!1,await this.store.put(this.record);let f=new S0(l);try{for(let P=a.next;P<d;P++){await this.writable(e);let M=await s.slice(P*$e,Math.min(s.size,(P+1)*$e)).arrayBuffer();this.guard(e);let b=await T0(M),E=0,h;do{await this.writable(e),await this.request("block-start",{file:o,block:P,size:M.byteLength,hash:b},"ready",e);for(let C=0;C<M.byteLength;C+=i)await this.writable(e),this.conn.send(Pc(this.id,o,P,C,M.slice(C,C+i)));if(h=await this.request("block-end",{file:o,block:P},["block-ack","block-nack"],e),h.file!==o||h.block!==P)throw Error("Acknowledgement belongs to another block.")}while(h.type==="block-nack"&&++E<3);if(h.type!=="block-ack"||h.hash!==b)throw Error("A block repeatedly failed integrity checks. Retry on a stable connection.");a.checkpoint=await f.update(M),a.hashes[P]=b,a.next=P+1,this.record.updated=Date.now(),await this.store.put(this.record),this.emit()}let v=await f.digest();this.guard(e),this.verifiedBytes=0,this.transition("verifying","All blocks received. Waiting for the receiver to verify the saved file\u2026");let y=await this.request("file-finish",{file:o,hash:v},"file-complete",e);if(y.file!==o||y.hash!==v)throw Error("Final receiver verification did not match.");a.complete=!0,a.digest=v,await this.store.put(this.record),this.transition(this.localPaused||this.peerPaused?"paused":"transferring")}finally{f.close()}}await this.request("finish",{},"complete",e),this.record.state="complete",await this.store.put(this.record),this.transition("complete","Receiver verified and saved all files."),clearInterval(this.heartbeat),setTimeout(()=>this.conn.close(),500)}async receiveControl(e,r){if(e.type==="hello"){if(this.helloSeen)throw Error("Duplicate transfer greeting.");if(this.helloSeen=!0,typeof e.token!="string"||!Ix.test(e.token)||typeof e.senderId!="string"||e.senderId.length>64||typeof e.receiverId!="string"||e.receiverId.length>64)throw Error("Invalid transfer identity.");if(this.options.senderId&&e.senderId!==this.options.senderId||this.options.receiverId&&e.receiverId!==this.options.receiverId)throw Error("Transfer is addressed to a different device.");this.id=e.id,this.token=e.token,this.manifest=J0(e.manifest),this.total=this.manifest.reduce((n,i)=>n+i.size,0),this.peerPaused=!!e.paused;let x=await this.store.get("receive:"+this.id);if(this.guard(r),x){if(this.options.requireDirectory&&x.storage!=="directory")throw Error("This older transfer used browser storage. Start a new transfer and choose a device folder.");if(x.token!==e.token||x.senderId!==e.senderId||x.receiverId!==e.receiverId||!Ji(x.manifest,this.manifest))throw Error("This transfer ID belongs to another sender or file.");this.record=x,this.transition("preparing","Recovering saved transfer progress\u2026"),this.storage=await this.Storage.open(x),this.guard(r);for(let n=0;n<x.files.length;n++)if(!x.files[n].complete){let i=await this.storage.verifyPrefix(n,x.files[n]);i!==x.files[n].next&&(x.files[n].next=i,x.files[n].hashes=x.files[n].hashes.slice(0,i))}await this.store.put(x),this.guard(r),this.acceptState()}else this.pendingHello=e,this.transition("offered"),this.options.onOffer?.(this.manifest,this);return}if(!this.record||!this.storage)throw Error("File data arrived before acceptance.");if(e.type==="block-start"){if(!Number.isInteger(e.file)||e.file<0)throw Error("Invalid file index.");let x=this.manifest[e.file],n=this.record.files[e.file];if(this.block||!x||n.complete||!Number.isInteger(e.block)||e.block!==n.next||e.size!==Math.min($e,x.size-e.block*$e)||e.size<=0||!Ix.test(e.hash))throw Error("Invalid block metadata.");this.block={file:e.file,index:e.block,hash:e.hash,data:new Uint8Array(e.size),received:0},this.send("ready",{file:e.file,block:e.block});return}if(e.type==="block-end"){let x=this.block;if(!x||e.file!==x.file||e.block!==x.index||x.received!==x.data.length)throw Error("Incomplete file block.");this.block=null;let n=await T0(x.data);if(this.guard(r),n!==x.hash){this.send("block-nack",{file:e.file,block:e.block});return}await this.storage.write(e.file,e.block,x.data),this.guard(r);let i=this.record.files[e.file];i.hashes[e.block]=n,i.next=e.block+1,this.record.updated=Date.now(),await this.store.put(this.record),this.guard(r),this.send("block-ack",{file:e.file,block:e.block,hash:n}),this.emit();return}if(e.type==="file-finish"){if(!Number.isInteger(e.file)||e.file<0)throw Error("Invalid file index.");let x=this.record.files[e.file],n=this.manifest[e.file];if(!n||!x||x.next!==Math.ceil(n.size/$e)||!Ix.test(e.hash)||this.block)throw Error("Cannot verify an incomplete file.");if(this.fileIndex=e.file,this.verifiedBytes=0,this.transition("verifying","Checking the saved file and preparing your download\u2026"),x.complete){if(x.digest!==e.hash)throw Error("Saved file hash does not match.");this.options.onFile?.({...n,...await this.storage.completedFile(e.file)})}else{let i=await this.storage.finalize(e.file,x,e.hash,o=>{this.verifiedBytes=o,this.emit(),r===this.epoch&&this.conn.open&&this.send("verify-progress",{bytes:o})},()=>this.terminal());this.guard(r),this.options.onFile?.({...n,...i})}this.send("file-complete",{file:e.file,hash:e.hash}),this.transition(this.localPaused||this.peerPaused?"paused":"transferring");return}if(e.type==="finish"){if(this.record.files.some(x=>!x.complete))throw Error("Cannot complete an unverified transfer.");this.record.state="complete",await this.store.put(this.record),this.guard(r),this.send("complete"),this.transition("complete","All files are verified."),clearInterval(this.heartbeat);return}throw Error("Unknown transfer message.")}receiveBinary(e){let r=_c(e,this.id),x=this.block;if(!x||r.file!==x.file||r.block!==x.index||r.offset!==x.received||r.offset+r.bytes.length>x.data.length)throw Error("Out-of-order or unexpected file data.");x.data.set(r.bytes,r.offset),x.received+=r.bytes.length}async accept(e){if(this.state!=="offered")return;let r=this.epoch;this.transition("preparing","Preparing persistent storage\u2026");try{if(this.options.requireDirectory&&(e?.storage!=="directory"||!e.directory))throw Error("Choose a device folder. Browser-stored file contents are disabled.");if(this.record={id:"receive:"+this.id,transferId:this.id,token:this.token,direction:"receive",manifest:this.manifest,files:this.manifest.map(Yi),senderId:this.pendingHello.senderId,receiverId:this.pendingHello.receiverId,created:Date.now(),state:"transferring",storage:e.storage,directory:e.directory},this.storage=await this.Storage.open(this.record),this.state==="cancelled"){await this.storage.cleanup();return}this.guard(r),await this.store.put(this.record),this.guard(r),this.acceptState()}catch(x){this.handleError(x)}}acceptState(){this.send("accept",{files:this.record.files.map(e=>({next:e.next,lastHash:e.hashes.at(-1)})),paused:this.localPaused}),this.transition(this.localPaused||this.peerPaused?"paused":"transferring")}refreshPause(){["transferring","paused"].includes(this.state)&&this.transition(this.localPaused||this.peerPaused?"paused":"transferring",this.peerPaused?"Paused on the other device.":this.localPaused?"Paused. Your verified progress is saved.":"")}pause(){["transferring","paused"].includes(this.state)&&(this.localPaused=!0,this.send("pause"),this.refreshPause())}resume(){if(this.state==="reconnecting"){this.options.onInterrupted?.(this);return}this.localPaused=!1,this.conn.open&&this.send("resume"),this.refreshPause()}interrupted(e){this.terminal()||this.state==="reconnecting"||(this.epoch++,this.block=null,this.rejectWaiters(new n0(e)),this.transition("reconnecting",e),this.options.onInterrupted?.(this))}decline(){this.fail("Receiver declined this transfer.","declined")}cancel(){this.fail("Transfer cancelled. Partial files are being removed.","cancelled")}fail(e,r="failed",x=!0){if(!this.terminal()){if(x&&this.id&&this.conn?.open)try{this.send(r==="declined"?"reject":r==="cancelled"?"cancel":"error",{reason:e.slice(0,200)})}catch{}this.epoch++,this.block=null,this.rejectWaiters(new n0(e)),clearInterval(this.heartbeat),this.record&&(this.record.state=r,this.store.put(this.record).catch(()=>{})),this.transition(r,e),setTimeout(()=>this.conn.close(),300),r==="cancelled"&&this.queue.finally(async()=>{await this.storage?.cleanup(),this.record&&await this.store.remove(this.record.id)}).catch(()=>{})}}};var Zi=/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;function eo(){let t;try{let e=[];for(let n of["wft-device-id","app_device_uuid"]){let i=localStorage.getItem(n);Zi.test(i||"")&&e.push({id:i,version:Number(localStorage.getItem(n+"-version"))||0,updatedAt:Number(localStorage.getItem(n+"-updated"))||0})}try{let n=JSON.parse(localStorage.getItem("wft-identity-candidates")||"[]");if(Array.isArray(n))for(let i of n)Zi.test(i?.id||"")&&e.push({id:i.id,version:Number(i.version)||0,updatedAt:Number(i.updatedAt)||0})}catch{}e.sort((n,i)=>i.version-n.version||i.updatedAt-n.updatedAt||n.id.localeCompare(i.id)),t=e[0]?.id||crypto.randomUUID();let r=e[0]?.version||1,x=e[0]?.updatedAt||Date.now();localStorage.setItem("wft-device-id",t),localStorage.setItem("app_device_uuid",t),localStorage.setItem("wft-device-id-version",String(r)),localStorage.setItem("wft-device-id-updated",String(x)),localStorage.removeItem("wft-identity-candidates")}catch{t=crypto.randomUUID()}return t}function Br(t=navigator.userAgent){let e=/Edg\//.test(t)?"Edge":/Firefox\//.test(t)?"Firefox":/Chrome|CriOS/.test(t)?"Chrome":"Safari",r=/iPhone/.test(t)?"iPhone":/iPad/.test(t)?"iPad":/Android/.test(t)?"Android":/Windows/.test(t)?"Windows":/Mac/.test(t)?"Mac":"Linux";return`${e} on ${r}`}var Cr=class{constructor({id:e,name:r,mode:x,onChange:n,onTransfer:i,onError:o,onConnectionRequest:s}){Object.assign(this,{id:e,name:r,mode:x,onChange:n,onTransfer:i,onError:o,onConnectionRequest:s}),this.rooms=new Map,this.contacts=[]}async load(){this.contacts=(await K0.list()).slice(0,8),await this.refresh()}async refresh(){for(let e of this.contacts){let r=this.rooms.get(e.id);if(r&&!["closed","disconnected"].includes(r.room.state))continue;r?.room.close();let x={contact:e,members:[]},n=new W0({onConnectionRequest:i=>i.deviceId===e.id?this.onConnectionRequest?.({...i,name:e.name,trusted:!0})??!1:!1,onMembers:i=>{x.members=i.filter(o=>o.deviceId===e.id).map(o=>({...o,name:e.name,trusted:!0,room:n})),this.onChange?.()},onState:()=>this.onChange?.(),onTransfer:(i,o)=>{o.deviceId===e.id?this.onTransfer(i,{...o,name:e.name,trusted:!0,room:n}):i.close()}},{deviceId:this.id,expectedDeviceId:e.id,privateCode:!0,inviteLifetime:1/0});x.room=n,this.rooms.set(e.id,x),n.open(e.secret,this.id<e.id,this.name,this.mode).catch(()=>{n.close(),x.members=[],this.onChange?.()})}this.onChange?.()}members(){return[...this.rooms.values()].flatMap(e=>e.members)}setMode(e){this.mode=e;for(let{room:r}of this.rooms.values())r.setMode(e)}async remember(e){if(e.deviceId===this.id)throw Error("These tabs share the same browser identity. Remember a different device or browser instead.");if(this.contacts.length>=8)throw Error("You can remember up to eight devices. Forget an old device in Settings first.");let r=Array.from(crypto.getRandomValues(new Uint8Array(32)),n=>n.toString(16).padStart(2,"0")).join("");if((await e.room.message(e.id,{type:"remember",secret:r}))?.accepted!==!0)throw Error("The other device did not agree to be remembered.");await this.add(e,r)}async add(e,r){if(this.contacts.length>=8&&!this.contacts.some(x=>x.id===e.deviceId))throw Error("Eight devices are already remembered.");if(!/^[0-9a-f-]{36}$/.test(e.deviceId)||!/^[a-f0-9]{64}$/.test(r))throw Error("Invalid device invitation.");await K0.put({id:e.deviceId,name:e.name.slice(0,48),secret:r,created:Date.now()}),await this.load()}async forget(e){this.rooms.get(e)?.room.close(),this.rooms.delete(e),await K0.remove(e),await this.load()}async rename(e,r){let x=await K0.get(e);x&&(x.name=r.trim().slice(0,48)||x.name,await K0.put(x),this.rooms.get(e)?.room.close(),await this.load())}close(){clearInterval(this.timer);for(let{room:e}of this.rooms.values())e.close()}};var ro=o0(to()),pr=class{constructor(e,r,x,n={}){Object.assign(this,{video:e,onResult:r,onError:x}),this.generation=0,this.media=n.media||navigator.mediaDevices,this.makeCanvas=n.makeCanvas||(()=>document.createElement("canvas")),this.decode=n.decode||ro.default}async start(){this.stop();let e=this.generation;try{let r=await this.media.getUserMedia({video:{facingMode:{ideal:"environment"},width:{ideal:1280},height:{ideal:720}},audio:!1});if(e!==this.generation){r.getTracks().forEach(o=>o.stop());return}if(this.stream=r,this.video.srcObject=r,await this.video.play(),e!==this.generation)return;let x=this.makeCanvas(),n=x.getContext("2d",{willReadFrequently:!0});if(!n)throw Error("Camera image unavailable");let i=()=>{if(e===this.generation)try{if(this.video.readyState>=2&&this.video.videoWidth&&this.video.videoHeight){x.width=Math.min(1280,this.video.videoWidth),x.height=Math.round(x.width*this.video.videoHeight/this.video.videoWidth),n.drawImage(this.video,0,0,x.width,x.height);let o=n.getImageData(0,0,x.width,x.height),s=this.decode(o.data,x.width,x.height,{inversionAttempts:"attemptBoth"});if(s){this.stop(),this.onResult(s.data);return}}this.timer=setTimeout(i,250)}catch{e===this.generation&&(this.stop(),this.onError("Could not read the camera image. Reopen the scanner or paste the invitation link."))}};i()}catch(r){if(e!==this.generation)return;this.stop(),this.onError(r.name==="NotAllowedError"?"Camera access was denied. Allow camera access in site settings, or paste an invite link.":"Camera unavailable. Close other camera apps, then retry, or paste the invitation link.")}}stop(){this.generation++,clearTimeout(this.timer),this.stream?.getTracks().forEach(e=>e.stop()),this.stream=null,this.video.srcObject=null}};var Rx=t=>t.replace(/\/index\.html$/,"/").replace(/\/$/,"");function xo(t,e,r=!1){let x=String(t).trim();if(!/^https?:\/\//i.test(x)){if(r)throw Error("That QR is not an invitation for this app.");return{code:P0(x),mode:null}}let n=new URL(x),i=new URL(e);if(n.origin!==i.origin||Rx(n.pathname)!==Rx(i.pathname))throw Error("That invitation belongs to a different website. Open the same app on both devices.");let s=new URLSearchParams(n.hash.slice(1)).get("mode");return{code:P0(x),mode:["send","receive"].includes(s)?s:null}}function no(t,e,r){let x=new URL(t);return x.pathname=Rx(x.pathname)+"/",x.search="",x.hash=new URLSearchParams({join:P0(e),mode:r==="send"?"receive":"send"}).toString(),x.href}var Ft=o0(nr());var Sc=/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;function L0(t,e=Date.now(),r=!1){if(!t||typeof t!="object"||!Sc.test(t.uuid||"")||typeof t.name!="string"||!t.name.trim()||t.name.length>48||typeof t.peerId!="string"||t.peerId.length>128||typeof t.peer2Id!="string"||t.peer2Id.length>128||!["online","offline"].includes(t.status))return!1;for(let x of["version","revision","heartbeatSeq","lastSeen","updatedAt"])if(!Number.isSafeInteger(t[x])||t[x]<0)return!1;return!(t.version!==t.revision||t.lastSeen>e+6e4||t.updatedAt>e+6e4||!r&&e-t.lastSeen>3e5)}var io=t=>JSON.stringify([t.status,t.peerId,t.peer2Id,t.name,t.uuid]);function mt(t,e){return t.revision-e.revision||t.heartbeatSeq-e.heartbeatSeq||t.updatedAt-e.updatedAt||io(t).localeCompare(io(e))}var Tc=t=>Object.fromEntries(["uuid","name","peerId","peer2Id","status","version","revision","heartbeatSeq","lastSeen","updatedAt"].map(e=>[e,t[e]]));function Ic(t,e,r=Date.now()){let x=new Map;for(let n of[...t,...e]){if(!L0(n,r))continue;let i=Tc(n);(!x.has(i.uuid)||mt(x.get(i.uuid),i)<0)&&x.set(i.uuid,i)}return[...x.values()].sort((n,i)=>i.lastSeen-n.lastSeen||i.updatedAt-n.updatedAt||n.uuid.localeCompare(i.uuid)).slice(0,256)}var Ar=class{constructor(e=indexedDB,r="wft-presence-v1"){this.indexed=e,this.name=r,this.database=null}async open(){return this.database?this.database:(this.database=await new Promise((e,r)=>{let x=this.indexed.open(this.name,1);x.onupgradeneeded=()=>{let n=x.result.createObjectStore("presenceRecords",{keyPath:"uuid"});for(let i of["peerId","status","lastSeen","updatedAt"])n.createIndex(i,i)},x.onsuccess=()=>e(x.result),x.onerror=()=>r(x.error)}),this.database)}async transaction(e,r){let x=await this.open();return new Promise((n,i)=>{let o=x.transaction("presenceRecords",e),s=o.objectStore("presenceRecords"),a;try{a=r(s)}catch(c){o.abort(),i(c);return}o.oncomplete=()=>n(a),o.onerror=()=>i(o.error),o.onabort=()=>i(o.error||Error("Presence storage interrupted."))})}async all(){let e=await this.open();return new Promise((r,x)=>{let n=e.transaction("presenceRecords").objectStore("presenceRecords").getAll();n.onsuccess=()=>r(n.result),n.onerror=()=>x(n.error)})}async merge(e,r=Date.now()){if(!Array.isArray(e)||e.length>256)throw Error("Invalid presence batch.");let x=await this.open();return new Promise((n,i)=>{let o=x.transaction("presenceRecords","readwrite"),s=o.objectStore("presenceRecords"),a=s.getAll(),c;a.onsuccess=()=>{try{let d=a.result;c=Ic(d,e,r);let l=new Set(c.map(f=>f.uuid));for(let f of d)l.has(f.uuid)||s.delete(f.uuid);for(let f of c)s.put(f)}catch(d){o.abort(),i(d)}},o.oncomplete=()=>n(c),o.onerror=()=>i(o.error),o.onabort=()=>i(o.error||Error("Presence merge interrupted."))})}async put(e,r=Date.now()){if(!L0(e,r,!0))throw Error("Invalid presence record.");return await this.merge([e],r),e}async cleanup(e=Date.now()){let r=await this.open();return new Promise((x,n)=>{let i=r.transaction("presenceRecords","readwrite"),o=i.objectStore("presenceRecords").openCursor(),s=[];o.onsuccess=()=>{let a=o.result;a&&(L0(a.value,e)||(s.push(a.value.uuid),a.delete()),a.continue())},i.oncomplete=()=>x(s),i.onerror=()=>n(i.error)})}async online(e=Date.now()){return(await this.all()).filter(r=>L0(r,e)&&r.status==="online").sort((r,x)=>r.name.localeCompare(x.name)||r.uuid.localeCompare(x.uuid))}close(){this.database?.close(),this.database=null}};var Mc=Ft.Peer||Ft.default.Peer||Ft.default,ao=1,oo=128*1024,Rc=2e4,mr=t=>/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(t||""),so=t=>[...t].reduce((e,r)=>e*33+r.charCodeAt(0)>>>0,5381)%ao,Lc=t=>[...t].reduce((e,r)=>(e*16777619^r.charCodeAt(0))>>>0,2166136261).toString(36),Fr=class{constructor({uuid:e,name:r,peer1Id:x="",db:n=new Ar,PeerClass:i=Mc,options:o=A0(),onChange:s=()=>{},onState:a=()=>{},channelFactory:c=f=>typeof BroadcastChannel=="function"?new BroadcastChannel(f):null,locks:d=navigator.locks,namespace:l=typeof location>"u"?"wifi-file-transfer-web":location.origin+location.pathname.replace(/index\.html$/,"")}){Object.assign(this,{uuid:e,name:r,peer1Id:x,db:n,PeerClass:i,options:o,onChange:s,onState:a,channelFactory:c,locks:d}),this.prefix="wftp-"+Lc(l)+"-",this.connections=new Map,this.pending=new Map,this.seen=new Map,this.enabled=!1,this.leader=!1,this.sessionId=crypto.randomUUID()}state(e,r=""){this.onState(e,r)}async start(){if(this.stopping&&await this.stopping,this.enabled){await this.publish();return}if(this.enabled=!0,this.channel=this.channelFactory?.("wft-presence-v1"),this.channel?.addEventListener("message",e=>this.handleTabMessage(e.data)),this.state("connecting","Starting Peer 2 online discovery\u2026"),this.locks?.request)await this.tryLeadership();else{this.leader=!0;try{await this.startNetwork()}catch(e){throw this.abortNetwork(),this.starting=!1,this.leader=!1,e}}}async tryLeadership(){if(this.lockPending||!this.enabled||this.leader)return;this.lockPending=!0;let e=!1,r,x=new Promise(n=>r=()=>{e||(e=!0,n())});this.lockTask=this.locks.request("wft-presence-leader",{ifAvailable:!0},async n=>{if(this.lockPending=!1,!this.enabled){r();return}if(!n){this.state("standby","Peer 2 is active in another tab."),r();return}this.leader=!0;try{await this.startNetwork(),this.failureCount=0,this.retryAt=0,r(),await new Promise(i=>this.releaseLock=i)}catch(i){this.abortNetwork(),this.starting=!1,this.leader=!1,this.failureCount=(this.failureCount||0)+1,this.retryAt=Date.now()+[5e3,15e3,3e4,6e4][Math.min(3,this.failureCount-1)],this.state("failed",i.message),r()}}).catch(n=>{this.lockPending=!1,this.state("failed",n.message),r()}),await x}abortNetwork(){clearInterval(this.timer),clearInterval(this.topologyTimer);for(let e of this.pending.values())clearTimeout(e.timer);this.pending.clear();for(let e of this.connections.values())e.close();this.connections.clear(),this.peer?.destroy(),this.peer=null,this.peer2Id=""}async startNetwork(){if(!this.enabled||this.starting)return;this.starting=!0;let e=so(this.uuid),r=this.prefix+e;try{this.peer=await this.createPeer(r),this.isSlotLeader=!0}catch(x){if(x.type!=="unavailable-id")throw x;this.peer=await this.createPeer(),this.isSlotLeader=!1}this.peer2Id=this.peer.id,this.peer.on("connection",x=>this.accept(x)),this.peer.on("disconnected",()=>{if(this.enabled){this.state("reconnecting","Peer 2 signaling interrupted\u2026");try{this.peer.reconnect()}catch{}}}),this.peer.on("error",x=>{["peer-unavailable","unavailable-id"].includes(x.type)||this.state("failed",`Peer 2 connection failed (${x.type||"network"}).`)}),await this.refreshSelf(!0),await this.publish(),await this.ensureTopology(),this.updateNetworkState(),this.starting=!1}createPeer(e){return new Promise((r,x)=>{let n=new this.PeerClass(e,this.options),i=setTimeout(()=>{n.destroy(),x(Error("Peer 2 service did not respond."))},2e4),o=!1;n.on("open",()=>{o||(o=!0,clearTimeout(i),r(n))}),n.on("error",s=>{o||(o=!0,clearTimeout(i),n.destroy(),x(s))})})}accept(e){if(e.metadata?.kind!=="presence-v1"||this.connections.size>=24){e.on("open",()=>e.close());return}this.attach(e)}attach(e){let r=e.peer,x=()=>{let s=this.pending.get(r);s?.timer&&clearTimeout(s.timer),s&&this.pending.delete(r);let a=this.connections.get(r);a&&a!==e&&a.close(),this.connections.set(r,e),this.updateNetworkState(),this.sendSummary(e)},n=0,i=Promise.resolve();e.on("open",x),e.on("data",s=>{if(n>=32){e.close();return}n++,i=i.then(()=>this.handleMessage(e,s)).catch(()=>e.close()).finally(()=>n--)});let o=()=>{this.connections.get(r)===e&&this.connections.delete(r);let s=this.pending.get(r);s?.conn===e&&(clearTimeout(s.timer),this.pending.delete(r)),this.updateNetworkState()};e.on("close",o),e.on("error",o),e.open&&x()}updateNetworkState(){!this.enabled||!this.peer||(this.isSlotLeader?this.state("connected",`Online \xB7 Peer 2 rendezvous ready \xB7 ${this.peer2Id}`):this.connections.size?this.state("connected",`Online \xB7 Peer 2 synchronized \xB7 ${this.peer2Id}`):this.state("connecting","Discovery is not connected. Tap Check again to retry."))}connect(e){if(!(!this.peer||!this.enabled||e===this.peer.id||this.connections.has(e)||this.pending.has(e)))try{let r=this.peer.connect(e,{reliable:!0,serialization:"json",metadata:{kind:"presence-v1",uuid:this.uuid}}),x=setTimeout(()=>{this.pending.get(e)?.conn===r&&this.pending.delete(e),r.open||r.close()},Rc);this.pending.set(e,{conn:r,timer:x}),this.attach(r)}catch{}}async ensureTopology(){if(!this.peer||!this.enabled)return;let e=this.prefix+so(this.uuid);if(!this.isSlotLeader){if(this.connections.has(e)||this.pending.has(e))this.slotMisses=0;else if(++this.slotMisses>=2){this.slotMisses=0,await this.restartNetwork();return}}for(let x=0;x<ao;x++){let n=this.prefix+x;n!==this.peer.id&&this.connect(n)}let r=await this.db.online();for(let x of r)x.uuid!==this.uuid&&x.peer2Id&&this.connect(x.peer2Id)}async restartNetwork(){if(!(this.restarting||!this.enabled||!this.leader)){this.restarting=!0,clearInterval(this.timer),clearInterval(this.topologyTimer);for(let e of this.pending.values())clearTimeout(e.timer);this.pending.clear();for(let e of this.connections.values())e.close();this.connections.clear(),this.peer?.destroy(),this.peer=null,this.starting=!1;try{await this.startNetwork()}catch(e){this.state("failed",e.message)}finally{this.starting=!1,this.restarting=!1}}}envelope(e,r){return{type:e,messageId:crypto.randomUUID(),originUuid:this.uuid,sentAt:Date.now(),payload:r}}send(e,r,x){if(!e.open)return;let n=this.envelope(r,x);JSON.stringify(n).length<=oo&&e.send(n)}async sendSummary(e){let r=await this.db.all();this.send(e,"SYNC_SUMMARY",{records:r.slice(0,256).map(({uuid:x,revision:n,heartbeatSeq:i,updatedAt:o})=>({uuid:x,revision:n,heartbeatSeq:i,updatedAt:o}))})}validEnvelope(e){if(!e||typeof e!="object"||!mr(e.originUuid)||!mr(e.messageId)||!Number.isFinite(e.sentAt)||Math.abs(Date.now()-e.sentAt)>600*1e3||JSON.stringify(e).length>oo||this.seen.has(e.messageId))return!1;for(this.seen.set(e.messageId,Date.now());this.seen.size>1024;)this.seen.delete(this.seen.keys().next().value);return!0}async handleMessage(e,r){if(this.validEnvelope(r))try{if(r.type==="SYNC_SUMMARY"){let x=r.payload?.records;if(!Array.isArray(x)||x.length>256)return;let n=new Map;for(let c of x)mr(c?.uuid)&&["revision","heartbeatSeq","updatedAt"].every(d=>Number.isSafeInteger(c[d])&&c[d]>=0)&&n.set(c.uuid,c);let i=await this.db.all(),o=new Map(i.map(c=>[c.uuid,c])),s=[],a=[];for(let c of i){let d=n.get(c.uuid);(!d||mt(c,{...c,...d})>0)&&s.push(c)}for(let[c,d]of n){let l=o.get(c);(!l||mt(l,{...l,...d})<0)&&a.push(c)}s.length&&this.send(e,"SYNC_RECORDS",{records:s}),a.length&&this.send(e,"SYNC_REQUEST",{uuids:a})}else if(r.type==="SYNC_REQUEST"){let x=r.payload?.uuids;if(!Array.isArray(x)||x.length>256||x.some(o=>!mr(o)))return;let n=new Set(x),i=(await this.db.all()).filter(o=>n.has(o.uuid));i.length&&this.send(e,"SYNC_RECORDS",{records:i})}else if(r.type==="SYNC_RECORDS"){let x=r.payload?.records;if(!Array.isArray(x)||x.length>256||x.some(o=>!L0(o)))return;let n=new Map((await this.db.all()).map(o=>[o.uuid,o])),i=x.filter(o=>!n.has(o.uuid)||mt(o,n.get(o.uuid))>0);if(!i.length)return;await this.db.merge(i),await this.publish(),await this.ensureTopology();for(let o of this.connections.values())o!==e&&this.sendSummary(o)}}catch{this.state("connected","Peer 2 ignored an invalid presence update.")}}revision(e=!1){let r="wft-presence-revision",x=this.localRevision||0;try{x=Math.max(x,Number(localStorage.getItem(r))||0),e&&localStorage.setItem(r,String(++x))}catch{e&&x++}return this.localRevision=x,x}async refreshSelf(e=!1,r="online"){let x=await this.db.all().then(a=>a.find(c=>c.uuid===this.uuid)),n=!x||x.name!==this.name||x.peerId!==this.peer1Id||x.peer2Id!==this.peer2Id||x.status!==r,i=Date.now(),o=this.revision(e||n),s={uuid:this.uuid,name:this.name.trim().slice(0,48)||"My device",peerId:this.peer1Id||"",peer2Id:this.peer2Id||"",status:r,version:o,revision:o,heartbeatSeq:(x?.heartbeatSeq||0)+1,lastSeen:i,updatedAt:i};return await this.db.put(s,i),this.self=s,s}async tick(){return this.tickPromise?this.tickPromise:(this.tickPromise=(async()=>{this.enabled&&!this.leader&&await this.tryLeadership(),await this.runTick()})().finally(()=>{this.tickPromise=null}),this.tickPromise)}async runTick(){if(!(!this.enabled||!this.leader)){for(let[e,r]of this.seen)Date.now()-r>600*1e3&&this.seen.delete(e);await this.refreshSelf(),this.enabled&&(await this.db.cleanup(),await this.ensureTopology(),await Promise.allSettled([...this.connections.values()].map(e=>this.sendSummary(e))),await this.publish(),this.updateNetworkState())}}async publish(){let e=await this.db.online();this.onChange(e),this.channel?.postMessage({type:"users",users:e})}handleTabMessage(e){!this.leader&&e?.type==="users"&&Array.isArray(e.users)&&this.onChange(e.users.filter(r=>L0(r)))}async setIdentity({name:e=this.name,peer1Id:r=this.peer1Id}){let x=e!==this.name||r!==this.peer1Id;if(this.name=e,this.peer1Id=r,x&&this.enabled&&this.leader){await this.refreshSelf(!0);for(let n of this.connections.values())this.sendSummary(n);await this.publish()}}async stop(){if(this.stopping)return this.stopping;if(this.enabled){this.stopping=this.stopNow();try{await this.stopping}finally{this.stopping=null}}}async stopNow(){if(this.enabled){if(this.enabled=!1,clearInterval(this.timer),clearInterval(this.topologyTimer),clearInterval(this.standbyTimer),await this.tickPromise?.catch(()=>{}),this.leader&&this.peer){try{await this.refreshSelf(!0,"offline");for(let e of this.connections.values())this.send(e,"SYNC_RECORDS",{records:[this.self]})}catch{}await new Promise(e=>setTimeout(e,100))}for(let e of this.pending.values())clearTimeout(e.timer);this.pending.clear();for(let e of this.connections.values())e.close();this.connections.clear(),this.peer?.destroy(),this.peer=null,this.peer2Id="",this.leader=!1,this.releaseLock?.(),this.releaseLock=null,await this.lockTask,this.channel?.close(),this.channel=null,this.state("offline","Peer 2 stopped \xB7 online discovery disabled.")}}};var vt=o0(nr());var Oc=vt.Peer||vt.default.Peer||vt.default,gt=t=>String(t||"").trim().slice(0,128),re={peer:null,id:"",opening:null,subscribers:new Set};function Uc(t){let r=[...re.subscribers].reverse().filter(x=>x.enabled&&x.acceptIncoming)[0];if(!r){t.on("open",()=>t.close());return}r.accept(t)}var gr=class{constructor(e={}){let{uuid:r,name:x,PeerClass:n=Oc,options:i=A0(),onIncoming:o,onConnectionRequest:s,onState:a=()=>{},locks:c=navigator.locks}=e;Object.assign(this,{uuid:r,name:x,PeerClass:n,options:i,onIncoming:o||(()=>{}),onConnectionRequest:s||(()=>!1),onState:a,locks:c}),this.authorized=new Map,this.acceptIncoming=typeof o=="function",this.id=`wftp-main-${r}`,this.enabled=!1,this.leader=!1}state(e,r=""){this.onState(e,r)}async start(){if(this.enabled&&re.id)return re.id;if(this.enabled=!0,re.subscribers.add(this),re.peer&&!re.peer.destroyed)return this.peer=re.peer,this.id=re.id||re.peer.id,this.leader=!0,this.state("connected","Main peer ready."),this.id;if(re.opening){let e=await re.opening;return this.peer=re.peer,this.id=e,this.leader=!!re.peer,e}if(this.locks?.request){let e,r=new Promise(x=>e=x);return this.lockTask=this.locks.request("wft-main-peer-leader",{ifAvailable:!0},async x=>{if(!this.enabled){e();return}if(!x){this.leader=!1,this.state("standby","Main Peer 1 is active in another tab."),e();return}this.leader=!0;try{await this.open(),e(),await new Promise(n=>this.releaseLock=n)}catch(n){this.leader=!1,this.state("failed",n.message),e()}}).catch(x=>{this.state("failed",x.message),e()}),await r,re.id||this.id}return this.leader=!0,this.open()}open(){return re.opening||(re.opening=new Promise((e,r)=>{let x=new this.PeerClass(this.id,this.options);re.peer=x,this.peer=x;let n=!1,i=setTimeout(()=>{n||(x.destroy(),re.peer=null,r(Error("Main peer did not start.")))},2e4);x.on("open",o=>{n=!0,clearTimeout(i),re.id=o,this.id=o;for(let s of re.subscribers)s.peer=x,s.id=o,s.leader=!0,s.state("connected","Main peer ready.");e(o)}),x.on("connection",Uc),x.on("disconnected",()=>{if(re.subscribers.size){for(let o of re.subscribers)o.state("reconnecting","Main peer reconnecting\u2026");try{x.reconnect()}catch{}}}),x.on("error",o=>{if(!n)clearTimeout(i),re.peer=null,r(o);else if(o.type!=="peer-unavailable")for(let s of re.subscribers)s.state("failed",`Main peer error (${o.type||"network"}).`)})}).finally(()=>{re.opening=null})),re.opening}accept(e){let r=e.metadata||{},x={id:e.peer,deviceId:gt(r.deviceId)||e.peer,name:gt(r.name)||"Online user",mode:"receive",onlineDirectory:!0};if(r.kind==="connection-request"){e.on("open",async()=>{let n=!1;try{n=await this.onConnectionRequest(x)}catch{}n&&this.authorized.set(x.deviceId,x),e.send({type:"connection-response",accepted:n}),setTimeout(()=>e.close(),200)});return}if(!this.authorized.has(x.deviceId)){e.on("open",()=>e.close());return}if(r.kind==="connection-probe"){e.on("open",()=>e.send("ready"));return}if(r.kind!=="file-v3"){e.on("open",()=>e.close());return}this.onIncoming(e,x)}connect(e,r){let x=re.peer||this.peer;if(!x||x.disconnected)throw Error("Main peer is not ready in this tab.");let n=gt(e);if(!n||n===x.id)throw Error("Invalid destination peer.");return x.connect(n,{reliable:!0,serialization:"raw",metadata:{kind:"file-v3",transferId:r,deviceId:this.uuid,name:this.name.slice(0,48)}})}requestConnection(e,r,x=9e4){let n=re.peer||this.peer,i=gt(e);if(!n||n.disconnected||!i||i===n.id)return Promise.reject(Error("Main peer is not ready for this device."));let o=n.connect(i,{reliable:!0,serialization:"json",metadata:{kind:"connection-request",deviceId:this.uuid,name:this.name.slice(0,48)}});return new Promise((s,a)=>{let c=!1,d=(f,v=!1)=>{c||(c=!0,clearTimeout(l),o.close(),f?a(f):v?(this.authorized.set(r.deviceId,r),s(r)):a(Error("The destination device declined the connection request.")))},l=setTimeout(()=>d(Error("The destination device did not answer the connection request.")),x);o.on("data",f=>f?.type==="connection-response"&&d(null,f.accepted===!0)),o.on("error",()=>d(Error("Could not send the connection request."))),o.on("close",()=>d(Error("The connection request closed early.")))})}probe(e,r=2e4){let x=re.peer||this.peer,n=gt(e);if(!x||x.disconnected||!n||n===x.id)return Promise.reject(Error("Main peer is not ready for this device."));let i=x.connect(n,{reliable:!0,serialization:"raw",metadata:{kind:"connection-probe",deviceId:this.uuid,name:this.name.slice(0,48)}});return new Promise((o,s)=>{let a=!1,c=l=>{a||(a=!0,clearTimeout(d),l?(i.close(),s(l)):o(i))},d=setTimeout(()=>c(Error("File connection timed out.")),r);i.on("data",l=>l==="ready"&&c()),i.on("error",()=>c(Error("Could not open the file connection."))),i.on("close",()=>c(Error("The file connection closed early.")))})}setName(e){this.name=e}async stop(){this.enabled&&(this.enabled=!1,re.subscribers.delete(this),this.peer=null,this.leader=!1,re.subscribers.size||(re.peer?.destroy(),re.peer=null,re.id="",this.releaseLock?.(),this.releaseLock=null),this.state("offline","Main peer subscription stopped."))}};async function co(){let t=await fetch(new URL("../connection-config.json",import.meta.url),{cache:"no-store",signal:AbortSignal.timeout(8e3)});if(!t.ok)return;let e=await t.json();if(!e.turnCredentialsUrl)return;let r=new URL(e.turnCredentialsUrl);if(r.protocol!=="https:")throw Error("The optional relay credential service must use HTTPS.");let x=await fetch(r,{credentials:"omit",cache:"no-store",signal:AbortSignal.timeout(8e3)});if(!x.ok)throw Error("Optional relay service unavailable; using default connection routes.");let n=await x.json();if(!Array.isArray(n.iceServers)||n.iceServers.length>8||!Number.isFinite(n.expiresAt)||n.expiresAt<Date.now()+6e4||n.expiresAt>Date.now()+864e5)throw Error("Relay credentials are invalid or expired.");let i=n.iceServers.map(o=>{let s=Array.isArray(o.urls)?o.urls:[o.urls];if(!s.length||s.some(a=>typeof a!="string"||!/^turns?:[^\s]+$/.test(a))||typeof o.username!="string"||typeof o.credential!="string")throw Error("Invalid relay configuration.");return{urls:s,username:o.username,credential:o.credential}});oi(i)}function Nc(){return A0().config.iceServers.some(t=>[t.urls].flat().some(e=>/^turns?:/i.test(e)))}async function Lx(t=7e3){let e={online:navigator.onLine,secure:window.isSecureContext,webrtc:typeof RTCPeerConnection=="function",relayConfigured:Nc()};if(!e.online)return{...e,local:!1,stun:!1,relay:!1,summary:"Internet is offline. Pairing needs internet access."};if(!e.secure||!e.webrtc)return{...e,local:!1,stun:!1,relay:!1,summary:"This browser cannot start secure WebRTC connections here."};try{let r=await si(t),x=r.relay?"Direct and relay routes are available.":r.stun?e.relayConfigured?"Direct setup works; the configured relay was not reachable in this check.":"Direct setup works. No TURN relay is configured, so restrictive networks may still block device connections.":"No internet-assisted WebRTC route was found. Check VPN, firewall, guest Wi-Fi, and mobile-data restrictions.";return{...e,...r,summary:x}}catch(r){return{...e,local:!1,stun:!1,relay:!1,summary:"Connection route check failed: "+r.message}}}{
-const Room=W0,newCode=ni,parseRoom=P0,BlockTransfer=Er,manifestFor=J0,records=M0,BlockStorage=I0,TrustedDevices=Cr,identity=eo,friendlyName=Br,Scanner=pr,readInvitation=xo,invitationUrl=no,PresencePeerManager=Fr,configureNetwork=co,connectionDiagnosis=Lx,qrcode=o0(ho()).default;
+const Room=W0,newCode=ni,parseRoom=P0,records=M0,BlockStorage=I0,identity=eo,friendlyName=Br,Scanner=pr,readInvitation=xo,invitationUrl=no,PresencePeerManager=Fr,configureNetwork=co,connectionDiagnosis=Lx,qrcode=o0(ho()).default;
+
+const {BlockTransfer,manifestFor}=(()=>{
+ const BLOCK_SIZE=$e,MAX_FILE_SIZE=zi,records=M0,BlockStorage=I0,cleanPath=Tx,friendlyStorageError=Wi,Integrity=S0,blockHash=T0,safeName=ur;
+ 
+const VERSION=3,HEADER=36,MAX_FRAME=64*1024,MAX_CONTROL=48*1024;
+const UUID=/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const HEX=/^[0-9a-f]{64}$/;
+const CLOSED=new Set(['complete','failed','declined','cancelled']);
+const TRANSITIONS={connecting:['waiting','offered','preparing','reconnecting'],waiting:['transferring','paused','reconnecting'],offered:['preparing','reconnecting'],preparing:['transferring','paused','reconnecting','verifying'],transferring:['paused','verifying','reconnecting'],paused:['transferring','verifying','reconnecting'],reconnecting:['connecting','waiting','offered','preparing','transferring','paused'],verifying:['transferring','paused','reconnecting']};
+class Interrupted extends Error {}
+const secret=()=>Array.from(crypto.getRandomValues(new Uint8Array(32)),b=>b.toString(16).padStart(2,'0')).join('');
+function manifestFor(files) {
+  if(!Array.isArray(files)||!files.length||files.length>200)throw Error('Choose between 1 and 200 files per transfer.');
+  const manifest=files.map(f=>{
+    if(typeof f.name!=='string'||f.name.length>240||!Number.isSafeInteger(f.size)||f.size<0||f.size>MAX_FILE_SIZE)throw Error('Invalid file metadata or file larger than the supported 1 TB limit.');
+    const path=f.webkitRelativePath||f.path||f.name;
+    return {name:safeName(f.name),path:cleanPath(path),size:f.size,type:typeof f.type==='string'?f.type.slice(0,120):'',lastModified:Number.isSafeInteger(f.lastModified)?f.lastModified:0};
+  });
+  if(new TextEncoder().encode(JSON.stringify(manifest)).length>32*1024)throw Error('Too many filenames in one batch. Select fewer files.');
+  return manifest;
+}
+function sameManifest(a,b){return JSON.stringify(a)===JSON.stringify(b);}
+const emptyFile=()=>({next:0,hashes:[],checkpoint:null,complete:false});
+function encodeChunk(id,file,block,offset,payload) {
+  const out=new Uint8Array(HEADER+payload.byteLength),v=new DataView(out.buffer);
+  v.setUint32(0,0x57465433);const hex=id.replace(/-/g,'');for(let n=0;n<16;n++)out[4+n]=parseInt(hex.slice(n*2,n*2+2),16);
+  v.setUint32(20,file);v.setUint32(24,block);v.setUint32(28,offset);v.setUint32(32,payload.byteLength);out.set(payload instanceof Uint8Array?payload:new Uint8Array(payload),HEADER);return out.buffer;
+}
+function decodeChunk(raw,id) {
+  if(!(raw instanceof ArrayBuffer)||raw.byteLength<=HEADER||raw.byteLength>MAX_FRAME)throw Error('Malformed binary frame.');
+  const v=new DataView(raw),hex=Array.from(new Uint8Array(raw,4,16),b=>b.toString(16).padStart(2,'0')).join('');
+  if(v.getUint32(0)!==0x57465433||hex!==id.replace(/-/g,'')||v.getUint32(32)!==raw.byteLength-HEADER)throw Error('File data belongs to a different transfer.');
+  return {file:v.getUint32(20),block:v.getUint32(24),offset:v.getUint32(28),bytes:new Uint8Array(raw,HEADER)};
+}
+class BlockTransfer {
+  constructor(conn,options={}) {
+    this.options=options;this.store=options.store||records;this.Storage=options.Storage||BlockStorage;
+    this.direction=options.files?'send':'receive';this.files=options.files;
+    this.record=options.record;this.manifest=this.record?.manifest;this.id=this.record?.transferId||options.id||(this.files?crypto.randomUUID():null);
+    this.token=this.record?.token||(this.files?secret():null);this.state='connecting';this.epoch=0;this.waiters=[];this.tasks=new Set();
+    this.localPaused=false;this.peerPaused=false;this.lastActivity=Date.now();this.lastUI=0;this.samples=[];this.bytes=0;this.total=0;
+    this.attach(conn);
+    this.heartbeat=setInterval(()=>{
+      if(this.terminal())return;
+      if(this.conn?.open&&this.id)try{this.send('ping');}catch{}
+      const limit=['offered','waiting','preparing','verifying'].includes(this.state)?180000:45000;
+      if(!this.localPaused&&!this.peerPaused&&this.state!=='reconnecting'&&Date.now()-this.lastActivity>limit)this.interrupted('Connection stopped responding. Verified progress is saved.');
+    },10000);
+  }
+  terminal(){return CLOSED.has(this.state);}
+  transition(next,detail='') {
+    if(this.terminal()&&next!==this.state)return;
+    if(next!==this.state&&!CLOSED.has(next)&&!TRANSITIONS[this.state]?.includes(next))throw Error(`Invalid transfer state: ${this.state} to ${next}`);
+    this.state=next;this.detail=detail;this.emit(true);
+  }
+  emit(force=false) {
+    const now=Date.now();if(!force&&now-this.lastUI<200)return;this.lastUI=now;
+    const bytes=this.record?this.record.files.reduce((sum,f,i)=>sum+Math.min(this.manifest[i].size,f.next*BLOCK_SIZE),0):0;
+    this.bytes=bytes;this.samples.push([now,bytes]);this.samples=this.samples.filter(s=>now-s[0]<5000);
+    const first=this.samples[0],speed=this.samples.length>1&&now>first[0]&&!['paused','reconnecting','verifying'].includes(this.state)?Math.max(0,(bytes-first[1])*1000/(now-first[0])):0;
+    this.options.onUpdate?.({id:this.id,state:this.state,detail:this.detail||'',direction:this.direction,files:this.manifest||[],bytes,total:this.total,speed,eta:speed?(this.total-bytes)/speed:null,remotePaused:this.peerPaused,localPaused:this.localPaused,fileIndex:this.fileIndex||0,verifiedBytes:this.verifiedBytes||0});
+  }
+  attach(conn) {
+    const old=this.conn,previousQueue=this.queue;this.epoch++;const epoch=this.epoch;this.conn=conn;this.queue=previousQueue?.catch(()=>{})||Promise.resolve();this.queuedBytes=0;this.block=null;this.helloSeen=false;
+    if(old&&old!==conn)old.close();this.rejectWaiters(new Interrupted('Reconnecting'));
+    if(this.state==='reconnecting')this.transition('connecting');this.lastActivity=Date.now();
+    conn.on('data',raw=>{
+      if(this.handleCancellation(raw,conn))return;
+      if(epoch!==this.epoch||this.terminal())return;
+      this.lastActivity=Date.now();
+      try {
+        if(typeof raw==='string') {
+          if(raw.length>MAX_CONTROL)throw Error('Control message too large.');const m=JSON.parse(raw);
+          if(!m||m.v!==VERSION||typeof m.type!=='string'||!UUID.test(m.id)||this.id&&m.id!==this.id)throw Error('Invalid transfer message.');
+          if(m.type==='ping'){this.send('pong');return;}if(m.type==='pong')return;
+          if(m.type==='pause'||m.type==='resume'){this.peerPaused=m.type==='pause';this.refreshPause();return;}
+          if(m.type==='cancel'||m.type==='reject'||m.type==='error'){this.fail(typeof m.reason==='string'?m.reason.slice(0,200):'The other device stopped the transfer.',m.type==='reject'?'declined':m.type==='cancel'?'cancelled':'failed',false);return;}
+          if(this.direction==='send') {
+            if(m.type==='verify-progress'){this.verifiedBytes=m.bytes;this.emit();return;}
+            const waiter=this.waiters.find(w=>w.types.includes(m.type));
+            if(!waiter)throw Error('Unexpected transfer acknowledgement.');this.waiters.splice(this.waiters.indexOf(waiter),1);waiter.resolve(m);return;
+          }
+          this.queue=this.queue.then(()=>{this.guard(epoch);return this.receiveControl(m,epoch);}).catch(e=>this.handleError(e));
+        }else {
+          const size=raw.byteLength||raw.size||0;this.queuedBytes+=size;if(this.queuedBytes>BLOCK_SIZE+2*1024*1024)throw Error('Peer sent too much data without acknowledgement.');
+          this.queue=this.queue.then(async()=>{try{this.guard(epoch);const data=raw instanceof Blob?await raw.arrayBuffer():raw;this.guard(epoch);this.receiveBinary(data);}finally{if(epoch===this.epoch)this.queuedBytes-=size;}}).catch(e=>this.handleError(e));
+        }
+      }catch(e){this.handleError(e);}
+    });
+    conn.on('close',()=>{if(epoch===this.epoch)this.interrupted('Connection interrupted. Verified blocks are preserved.');});
+    conn.on('error',()=>{if(epoch===this.epoch)this.interrupted('Could not reach the other device. Verified progress is saved.');});
+    if(this.files){const start=()=>this.trackTask(this.run(epoch).catch(e=>this.handleError(e)));if(conn.open)queueMicrotask(start);else conn.on('open',start);}
+  }
+  trackTask(promise){this.tasks.add(promise);promise.then(()=>this.tasks.delete(promise),()=>this.tasks.delete(promise));return promise;}
+  handleCancellation(raw,conn){
+    if(conn!==this.conn||typeof raw!=='string'||raw.length>MAX_CONTROL)return false;
+    let message;try{message=JSON.parse(raw);}catch{return false;}
+    if(!message||message.v!==VERSION||!UUID.test(message.id)||this.id&&message.id!==this.id)return false;
+    if(message.type==='cancel-ack'){this.finishCancellation?.(true);return true;}
+    if(message.type!=='cancel')return false;
+    if(!this.id)this.id=message.id;
+    if(!this.terminal())this.fail('Transfer cancelled by the other device.','cancelled',false);
+    if(conn.open)try{conn.send(JSON.stringify({v:VERSION,id:this.id,type:'cancel-ack'}));}catch{}
+    return true;
+  }
+  beginCancellation(){
+    const conn=this.conn;let settled=false;
+    const sendCancel=()=>{if(!settled&&conn.open)try{conn.send(JSON.stringify({v:VERSION,id:this.id,type:'cancel',reason:'Transfer cancelled.'}));}catch{}};
+    this.cancelAcknowledged=new Promise(resolve=>{
+      const timer=setTimeout(()=>this.finishCancellation(false),15000);
+      this.finishCancellation=confirmed=>{
+        if(settled)return;settled=true;clearTimeout(timer);conn.off?.('open',sendCancel);resolve(confirmed);
+        this.detail=confirmed?'Transfer cancelled on both devices.':'Cancelled locally. The other device could not be reached.';
+        this.emit(true);conn?.close();
+      };
+    });
+    conn.on('open',sendCancel);sendCancel();
+    // A separate approved control channel bypasses any queued file frames.
+    Promise.resolve().then(()=>this.options.onCancel?.(this.id)).then(confirmed=>{if(confirmed===true)this.finishCancellation(true);}).catch(()=>{});
+  }
+  guard(epoch){if(this.terminal())throw new Interrupted('Transfer stopped.');if(epoch!==this.epoch||!this.conn.open)throw new Interrupted('Connection interrupted.');}
+  handleError(e){if(e instanceof Interrupted)return;this.fail(friendlyStorageError(e));}
+  send(type,extra={}){if(!this.conn?.open||!this.id)throw new Interrupted('Connection unavailable.');const message=JSON.stringify({v:VERSION,id:this.id,type,...extra});if(new TextEncoder().encode(message).length>MAX_CONTROL)throw Error('Transfer metadata is too large. Select fewer files.');this.conn.send(message);}
+  rejectWaiters(error){for(const w of this.waiters)w.reject(error);this.waiters=[];}
+  request(type,extra,types,epoch) {
+    this.guard(epoch);
+    return new Promise((resolve,reject)=>{
+      const timeout=setTimeout(()=>{this.waiters=this.waiters.filter(w=>w!==waiter);reject(Error('The other device did not respond. Your progress is saved.'));},type==='file-finish'?3600000:180000);
+      const waiter={types:Array.isArray(types)?types:[types],resolve:m=>{clearTimeout(timeout);resolve(m);},reject:e=>{clearTimeout(timeout);reject(e);}};
+      this.waiters.push(waiter);try{this.send(type,extra);}catch(e){this.waiters.pop();waiter.reject(e);}
+    });
+  }
+  async writable(epoch) {
+    while(this.localPaused||this.peerPaused){this.guard(epoch);await new Promise(r=>setTimeout(r,100));}
+    this.guard(epoch);const dc=this.conn.dataChannel;
+    if(!dc||dc.bufferedAmount<1024*1024)return;
+    dc.bufferedAmountLowThreshold=256*1024;
+    await new Promise((resolve,reject)=>{
+      const finish=()=>{clearTimeout(timer);dc.removeEventListener('bufferedamountlow',low);dc.removeEventListener('close',closed);resolve();};
+      const low=()=>{if(dc.bufferedAmount<=dc.bufferedAmountLowThreshold)finish();};
+      const closed=()=>{finish();reject(new Interrupted('Connection closed'));};
+      const timer=setTimeout(finish,1000);dc.addEventListener('bufferedamountlow',low);dc.addEventListener('close',closed);low();
+    });
+    return this.writable(epoch);
+  }
+  async run(epoch) {
+    this.manifest=manifestFor(this.files);this.total=this.manifest.reduce((n,f)=>n+f.size,0);
+    if(!this.record)this.record={id:'send:'+this.id,transferId:this.id,token:this.token,direction:'send',sourceFolder:!!this.files[0]?.archiveFolder,manifest:this.manifest,files:this.manifest.map(emptyFile),senderId:this.options.senderId||'local',receiverId:this.options.receiverId||'remote',created:Date.now(),state:'waiting'};
+    if(!sameManifest(this.manifest,this.record.manifest))throw Error('Select the same original files, with matching names, sizes, and modification dates, to resume.');
+    this.guard(epoch);const acceptance=this.request('hello',{token:this.token,manifest:this.manifest,senderId:this.record.senderId,receiverId:this.record.receiverId,paused:this.localPaused},'accept',epoch);this.transition('waiting');
+    const accepted=await acceptance;
+    if(!Array.isArray(accepted.files)||accepted.files.length!==this.files.length)throw Error('Invalid saved transfer state.');
+    await this.store.put(this.record);this.guard(epoch);
+    this.peerPaused=!!accepted.paused;this.transition(this.localPaused||this.peerPaused?'paused':'transferring');
+    const maxMessage=this.conn.peerConnection?.sctp?.maxMessageSize;
+    const transport=Math.min(MAX_FRAME,Number.isFinite(maxMessage)&&maxMessage>HEADER?maxMessage:16*1024)-HEADER;
+    for(let f=0;f<this.files.length;f++) {
+      this.fileIndex=f;const file=this.files[f],state=this.record.files[f],remote=accepted.files[f],count=Math.ceil(file.size/BLOCK_SIZE);
+      if(!Number.isInteger(remote.next)||remote.next<0||remote.next>count)throw Error('Invalid saved block offset.');
+      let checkpoint=state.checkpoint;
+      if(remote.next!==state.next||this.options.reselected) {
+        const rebuild=new Integrity();try{
+          for(let b=0;b<remote.next;b++) {this.guard(epoch);const bytes=await file.slice(b*BLOCK_SIZE,Math.min(file.size,(b+1)*BLOCK_SIZE)).arrayBuffer();const digest=await blockHash(bytes);if(state.hashes[b]&&state.hashes[b]!==digest)throw Error('The selected source file changed. Choose the original file or start a new transfer.');state.hashes[b]=digest;checkpoint=await rebuild.update(bytes);}
+        }finally{rebuild.close();}
+        if(!remote.next)checkpoint=null;
+      }
+      if(remote.next&&remote.lastHash!==state.hashes[remote.next-1])throw Error('Saved source and receiver progress do not match.');
+      state.next=remote.next;state.checkpoint=checkpoint;state.complete=false;await this.store.put(this.record);
+      const hash=new Integrity(checkpoint);
+      try {
+        for(let b=state.next;b<count;b++) {
+          await this.writable(epoch);
+          const bytes=await file.slice(b*BLOCK_SIZE,Math.min(file.size,(b+1)*BLOCK_SIZE)).arrayBuffer();this.guard(epoch);
+          const checkpoint=hash.update(bytes);checkpoint.catch(()=>{});
+          const digest=await blockHash(bytes);this.guard(epoch);let attempts=0,ack;
+          do {
+            await this.writable(epoch);
+            await this.request('block-start',{file:f,block:b,size:bytes.byteLength,hash:digest},'ready',epoch);
+            for(let offset=0;offset<bytes.byteLength;offset+=transport) {
+              if(this.localPaused||this.peerPaused||(this.conn.dataChannel?.bufferedAmount||0)>=1024*1024)await this.writable(epoch);
+              this.guard(epoch);this.conn.send(encodeChunk(this.id,f,b,offset,new Uint8Array(bytes,offset,Math.min(transport,bytes.byteLength-offset))));
+            }
+            ack=await this.request('block-end',{file:f,block:b},['block-ack','block-nack'],epoch);
+            if(ack.file!==f||ack.block!==b)throw Error('Acknowledgement belongs to another block.');
+          }while(ack.type==='block-nack'&&++attempts<3);
+          if(ack.type!=='block-ack'||ack.hash!==digest)throw Error('A block repeatedly failed integrity checks. Retry on a stable connection.');
+          state.checkpoint=await checkpoint;this.guard(epoch);state.hashes[b]=digest;state.next=b+1;this.record.updated=Date.now();await this.store.put(this.record);this.emit();
+        }
+        const digest=await hash.digest();this.guard(epoch);this.verifiedBytes=0;this.transition('verifying','All blocks received. Waiting for the receiver to verify the saved file…');
+        const result=await this.request('file-finish',{file:f,hash:digest},'file-complete',epoch);
+        if(result.file!==f||result.hash!==digest)throw Error('Final receiver verification did not match.');
+        state.complete=true;state.digest=digest;await this.store.put(this.record);
+        this.transition(this.localPaused||this.peerPaused?'paused':'transferring');
+      }finally{hash.close();}
+    }
+    await this.request('finish',{},'complete',epoch);this.record.state='complete';await this.store.put(this.record);this.transition('complete','Receiver verified and saved all files.');clearInterval(this.heartbeat);setTimeout(()=>this.conn.close(),500);
+  }
+  async receiveControl(m,epoch) {
+    if(m.type==='hello') {
+      if(this.helloSeen)throw Error('Duplicate transfer greeting.');this.helloSeen=true;
+      if(typeof m.token!=='string'||!HEX.test(m.token)||typeof m.senderId!=='string'||m.senderId.length>64||typeof m.receiverId!=='string'||m.receiverId.length>64)throw Error('Invalid transfer identity.');
+      if(this.options.senderId&&m.senderId!==this.options.senderId||this.options.receiverId&&m.receiverId!==this.options.receiverId)throw Error('Transfer is addressed to a different device.');
+      this.id=m.id;this.token=m.token;this.manifest=manifestFor(m.manifest);this.total=this.manifest.reduce((n,f)=>n+f.size,0);this.peerPaused=!!m.paused;
+      const saved=await this.store.get('receive:'+this.id);this.guard(epoch);
+      if(saved) {
+        if(this.options.requireDirectory&&saved.storage!=='directory')throw Error('This older transfer used browser storage. Start a new transfer and choose a device folder.');
+        if(saved.token!==m.token||saved.senderId!==m.senderId||saved.receiverId!==m.receiverId||!sameManifest(saved.manifest,this.manifest))throw Error('This transfer ID belongs to another sender or file.');
+        this.record=saved;this.transition('preparing','Recovering saved transfer progress…');this.storage=await this.Storage.open(saved);this.guard(epoch);
+        for(let f=0;f<saved.files.length;f++)if(!saved.files[f].complete){const valid=await this.storage.verifyPrefix(f,saved.files[f]);if(valid!==saved.files[f].next){saved.files[f].next=valid;saved.files[f].hashes=saved.files[f].hashes.slice(0,valid);}}
+        await this.store.put(saved);this.guard(epoch);this.acceptState();
+      }else {
+        this.pendingHello=m;this.transition('offered');this.options.onOffer?.(this.manifest,this);
+      }return;
+    }
+    if(!this.record||!this.storage)throw Error('File data arrived before acceptance.');
+    if(m.type==='block-start') {
+      if(!Number.isInteger(m.file)||m.file<0)throw Error('Invalid file index.');const file=this.manifest[m.file],state=this.record.files[m.file];
+      if(this.block||!file||state.complete||!Number.isInteger(m.block)||m.block!==state.next||m.size!==Math.min(BLOCK_SIZE,file.size-m.block*BLOCK_SIZE)||m.size<=0||!HEX.test(m.hash))throw Error('Invalid block metadata.');
+      this.block={file:m.file,index:m.block,hash:m.hash,data:new Uint8Array(m.size),received:0};this.send('ready',{file:m.file,block:m.block});return;
+    }
+    if(m.type==='block-end') {
+      const block=this.block;if(!block||m.file!==block.file||m.block!==block.index||block.received!==block.data.length)throw Error('Incomplete file block.');
+      this.block=null;const digest=await blockHash(block.data);this.guard(epoch);
+      if(digest!==block.hash){this.send('block-nack',{file:m.file,block:m.block});return;}
+      await this.storage.write(m.file,m.block,block.data);this.guard(epoch);
+      const state=this.record.files[m.file];state.hashes[m.block]=digest;state.next=m.block+1;this.record.updated=Date.now();await this.store.put(this.record);this.guard(epoch);
+      this.send('block-ack',{file:m.file,block:m.block,hash:digest});this.emit();return;
+    }
+    if(m.type==='file-finish') {
+      if(!Number.isInteger(m.file)||m.file<0)throw Error('Invalid file index.');const state=this.record.files[m.file],file=this.manifest[m.file];if(!file||!state||state.next!==Math.ceil(file.size/BLOCK_SIZE)||!HEX.test(m.hash)||this.block)throw Error('Cannot verify an incomplete file.');
+      this.fileIndex=m.file;this.verifiedBytes=0;this.transition('verifying','Checking the saved file and preparing your download…');
+      if(state.complete){if(state.digest!==m.hash)throw Error('Saved file hash does not match.');this.options.onFile?.({...file,...await this.storage.completedFile(m.file)});}
+      else {
+        const result=await this.storage.finalize(m.file,state,m.hash,bytes=>{this.verifiedBytes=bytes;this.emit();if(epoch===this.epoch&&this.conn.open)this.send('verify-progress',{bytes});},()=>this.terminal());
+        this.guard(epoch);this.options.onFile?.({...file,...result});
+      }
+      this.send('file-complete',{file:m.file,hash:m.hash});this.transition(this.localPaused||this.peerPaused?'paused':'transferring');return;
+    }
+    if(m.type==='finish') {
+      if(this.record.files.some(f=>!f.complete))throw Error('Cannot complete an unverified transfer.');
+      this.record.state='complete';await this.store.put(this.record);this.guard(epoch);this.send('complete');this.transition('complete','All files are verified.');clearInterval(this.heartbeat);return;
+    }
+    throw Error('Unknown transfer message.');
+  }
+  receiveBinary(raw) {
+    const frame=decodeChunk(raw,this.id),block=this.block;
+    if(!block||frame.file!==block.file||frame.block!==block.index||frame.offset!==block.received||frame.offset+frame.bytes.length>block.data.length)throw Error('Out-of-order or unexpected file data.');
+    block.data.set(frame.bytes,frame.offset);block.received+=frame.bytes.length;
+  }
+  accept(destination){return this.trackTask(this.acceptDestination(destination));}
+  async acceptDestination(destination) {
+    if(this.state!=='offered')return;const epoch=this.epoch;this.transition('preparing','Preparing persistent storage…');
+    try {
+      if(this.options.requireDirectory&&(destination?.storage!=='directory'||!destination.directory))throw Error('Choose a device folder. Browser-stored file contents are disabled.');
+      this.record={id:'receive:'+this.id,transferId:this.id,token:this.token,direction:'receive',manifest:this.manifest,files:this.manifest.map(emptyFile),senderId:this.pendingHello.senderId,receiverId:this.pendingHello.receiverId,created:Date.now(),state:'transferring',storage:destination.storage,directory:destination.directory};
+      this.storage=await this.Storage.open(this.record);if(this.state==='cancelled'){await this.storage.cleanup();return;}this.guard(epoch);await this.store.put(this.record);this.guard(epoch);this.acceptState();
+    }catch(e){this.handleError(e);}
+  }
+  acceptState(){this.send('accept',{files:this.record.files.map(f=>({next:f.next,lastHash:f.hashes.at(-1)})),paused:this.localPaused});this.transition(this.localPaused||this.peerPaused?'paused':'transferring');}
+  refreshPause(){if(['transferring','paused'].includes(this.state))this.transition(this.localPaused||this.peerPaused?'paused':'transferring',this.peerPaused?'Paused on the other device.':this.localPaused?'Paused. Your verified progress is saved.':'');}
+  pause(){if(!['transferring','paused'].includes(this.state))return;this.localPaused=true;this.send('pause');this.refreshPause();}
+  resume(){if(this.state==='reconnecting'){this.options.onInterrupted?.(this);return;}this.localPaused=false;if(this.conn.open)this.send('resume');this.refreshPause();}
+  interrupted(detail) {
+    if(this.terminal()||this.state==='reconnecting')return;
+    this.epoch++;this.block=null;
+    this.rejectWaiters(new Interrupted(detail));this.transition('reconnecting',detail);this.options.onInterrupted?.(this);
+  }
+  decline(){this.fail('Receiver declined this transfer.','declined');}
+  cancel(notify=true){this.fail('Transfer cancelled. Partial files are being removed.','cancelled',notify);}
+  fail(detail,state='failed',notify=true) {
+    if(this.terminal())return;
+    if(notify&&state!=='cancelled'&&this.id&&this.conn?.open)try{this.send(state==='declined'?'reject':'error',{reason:detail.slice(0,200)});}catch{}
+    this.epoch++;this.block=null;this.rejectWaiters(new Interrupted('Transfer stopped'));clearInterval(this.heartbeat);
+    let persisted=Promise.resolve();
+    if(this.record){this.record.state=state;persisted=this.store.put(this.record).catch(()=>{});}
+    if(state==='cancelled'||state==='declined'){
+      this.cleanupPromise=(async()=>{
+        await Promise.allSettled([this.queue,...this.tasks,persisted]);
+        await this.storage?.cleanup();
+        if(this.record)await this.store.remove(this.record.id);
+      })();
+      this.cleanupPromise.catch(error=>this.options.onCleanupError?.(error));
+    }
+    // Set the acknowledgement listener before publishing the terminal UI state.
+    if(state==='cancelled'&&notify)this.beginCancellation();
+    this.transition(state,detail);
+    if(state!=='cancelled'||!notify){const conn=this.conn;setTimeout(()=>conn.close(),state==='cancelled'?5000:1000);}
+  }
+}
+ return {BlockTransfer,manifestFor};
+})();
+const TrustedDevices=(()=>{
+ const Room=W0,deviceRecords=K0;
+ const UUID=/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+function identity(){
+ let id;try{
+  const candidates=[];
+  for(const key of ['wft-device-id','app_device_uuid']){const value=localStorage.getItem(key);if(UUID.test(value||''))candidates.push({id:value,version:Number(localStorage.getItem(key+'-version'))||0,updatedAt:Number(localStorage.getItem(key+'-updated'))||0});}
+  try{const legacy=JSON.parse(localStorage.getItem('wft-identity-candidates')||'[]');if(Array.isArray(legacy))for(const row of legacy)if(UUID.test(row?.id||''))candidates.push({id:row.id,version:Number(row.version)||0,updatedAt:Number(row.updatedAt)||0});}catch{}
+  candidates.sort((a,b)=>b.version-a.version||b.updatedAt-a.updatedAt||a.id.localeCompare(b.id));id=candidates[0]?.id||crypto.randomUUID();
+  const version=candidates[0]?.version||1,updatedAt=candidates[0]?.updatedAt||Date.now();
+  localStorage.setItem('wft-device-id',id);localStorage.setItem('app_device_uuid',id);localStorage.setItem('wft-device-id-version',String(version));localStorage.setItem('wft-device-id-updated',String(updatedAt));localStorage.removeItem('wft-identity-candidates');
+ }catch{id=crypto.randomUUID();}return id;
+}
+function friendlyName(ua=navigator.userAgent){const browser=/Edg\//.test(ua)?'Edge':/Firefox\//.test(ua)?'Firefox':/Chrome|CriOS/.test(ua)?'Chrome':'Safari';const os=/iPhone/.test(ua)?'iPhone':/iPad/.test(ua)?'iPad':/Android/.test(ua)?'Android':/Windows/.test(ua)?'Windows':/Mac/.test(ua)?'Mac':'Linux';return `${browser} on ${os}`;}
+class TrustedDevices {
+ constructor({id,name,mode,onChange,onTransfer,onError,onConnectionRequest,onCancel}){Object.assign(this,{id,name,mode,onChange,onTransfer,onError,onConnectionRequest,onCancel});this.rooms=new Map();this.contacts=[];}
+ async load(){this.contacts=(await deviceRecords.list()).slice(0,8);await this.refresh();}
+ async refresh(){
+  for(const contact of this.contacts){
+   const current=this.rooms.get(contact.id);if(current&&!['closed','disconnected'].includes(current.room.state))continue;
+   current?.room.close();const entry={contact,members:[]};
+   const room=new Room({onMessage:(message,member,reply)=>reply({cancelled:message?.type==='transfer-cancel'&&member.deviceId===contact.id&&this.onCancel?.(message.id,member)===true}),onConnectionRequest:member=>member.deviceId===contact.id?(this.onConnectionRequest?.({...member,name:contact.name,trusted:true})??false):false,onMembers:list=>{entry.members=list.filter(m=>m.deviceId===contact.id).map(m=>({...m,name:contact.name,trusted:true,room}));this.onChange?.();},onState:()=>this.onChange?.(),onTransfer:(conn,m)=>{if(m.deviceId===contact.id)this.onTransfer(conn,{...m,name:contact.name,trusted:true,room});else conn.close();}}, {deviceId:this.id,expectedDeviceId:contact.id,privateCode:true,inviteLifetime:Infinity});
+   entry.room=room;this.rooms.set(contact.id,entry);
+   void room.open(contact.secret,this.id<contact.id,this.name,this.mode).catch(()=>{room.close();entry.members=[];this.onChange?.();});
+  }this.onChange?.();
+ }
+ members(){return [...this.rooms.values()].flatMap(e=>e.members);}
+ setMode(mode){this.mode=mode;for(const {room} of this.rooms.values())room.setMode(mode);}
+ async remember(member){if(member.deviceId===this.id)throw Error('These tabs share the same browser identity. Remember a different device or browser instead.');if(this.contacts.length>=8)throw Error('You can remember up to eight devices. Forget an old device in Settings first.');const secret=Array.from(crypto.getRandomValues(new Uint8Array(32)),n=>n.toString(16).padStart(2,'0')).join('');const answer=await member.room.message(member.id,{type:'remember',secret});if(answer?.accepted!==true)throw Error('The other device did not agree to be remembered.');await this.add(member,secret);}
+ async add(member,secret){if(this.contacts.length>=8&&!this.contacts.some(c=>c.id===member.deviceId))throw Error('Eight devices are already remembered.');if(!/^[0-9a-f-]{36}$/.test(member.deviceId)||!/^[a-f0-9]{64}$/.test(secret))throw Error('Invalid device invitation.');await deviceRecords.put({id:member.deviceId,name:member.name.slice(0,48),secret,created:Date.now()});await this.load();}
+ async forget(id){this.rooms.get(id)?.room.close();this.rooms.delete(id);await deviceRecords.remove(id);await this.load();}
+ async rename(id,name){const record=await deviceRecords.get(id);if(!record)return;record.name=name.trim().slice(0,48)||record.name;await deviceRecords.put(record);this.rooms.get(id)?.room.close();await this.load();}
+ close(){clearInterval(this.timer);for(const {room} of this.rooms.values())room.close();}
+}
+
+ return TrustedDevices;
+})();
 const MainPeerManager=(()=>{
  const PeerModule=vt,peerOptions=A0;
  const Peer=PeerModule.Peer||PeerModule.default.Peer||PeerModule.default;
@@ -121,8 +449,8 @@ function dispatchIncoming(conn){
 
 class MainPeerManager{
  constructor(config={}){
-  const {uuid,name,PeerClass=Peer,options=peerOptions(),onIncoming,onConnectionRequest,onConnected=()=>{},onDisconnected=()=>{},onState=()=>{},locks=navigator.locks}=config;
-  Object.assign(this,{uuid,name,PeerClass,options,onIncoming:onIncoming||(()=>{}),onConnectionRequest:onConnectionRequest||(()=>false),onConnected,onDisconnected,onState,locks});this.authorized=new Map();this.connections=new Map();
+  const {uuid,name,PeerClass=Peer,options=peerOptions(),onIncoming,onConnectionRequest,onCancel=()=>false,onConnected=()=>{},onDisconnected=()=>{},onState=()=>{},locks=navigator.locks}=config;
+  Object.assign(this,{uuid,name,PeerClass,options,onIncoming:onIncoming||(()=>{}),onConnectionRequest:onConnectionRequest||(()=>false),onCancel,onConnected,onDisconnected,onState,locks});this.authorized=new Map();this.connections=new Map();
   this.acceptIncoming=typeof onIncoming==='function';
   this.id=`wftp-main-${uuid}`;this.enabled=false;this.leader=false;
  }
@@ -168,6 +496,11 @@ class MainPeerManager{
     this.onDisconnected(member);
   };
   conn.on('close',disconnected);conn.on('error',()=>{conn.close();disconnected();});
+  conn.on('data',message=>{
+    if(message?.type!=='transfer-cancel'||typeof message.id!=='string'||message.id.length>64)return;
+    const cancelled=this.onCancel(message.id,member)===true;
+    if(conn.open)conn.send({type:'transfer-cancelled',id:message.id,cancelled});
+  });
   this.onConnected(member);
  }
  accept(conn){
@@ -230,6 +563,17 @@ class MainPeerManager{
   const peer=shared.peer||this.peer,id=safe(remoteId);if(!peer||peer.disconnected||!id||id===peer.id)return Promise.reject(Error('Main peer is not ready for this device.'));
   const conn=peer.connect(id,{reliable:true,serialization:'raw',metadata:{kind:'connection-probe',deviceId:this.uuid,name:this.name.slice(0,48)}});
   return new Promise((resolve,reject)=>{let done=false;const finish=error=>{if(done)return;done=true;clearTimeout(timer);if(error){conn.close();reject(error);}else resolve(conn);};const timer=setTimeout(()=>finish(Error('File connection timed out.')),timeout);conn.on('data',value=>value==='ready'&&finish());conn.on('error',()=>finish(Error('Could not open the file connection.')));conn.on('close',()=>finish(Error('The file connection closed early.')));});
+ }
+ cancelTransfer(remoteId,id){
+  const member=[...this.authorized.values()].find(m=>m.id===remoteId),conn=member&&this.connections.get(member.deviceId);
+  if(!conn?.open)return Promise.resolve(false);
+  return new Promise(resolve=>{
+   let done=false;
+   const finish=value=>{if(done)return;done=true;clearTimeout(timer);conn.off?.('data',receive);resolve(value);};
+   const receive=message=>{if(message?.type==='transfer-cancelled'&&message.id===id)finish(message.cancelled===true);};
+   const timer=setTimeout(()=>finish(false),5000);
+   conn.on('data',receive);try{conn.send({type:'transfer-cancel',id});}catch{finish(false);}
+  });
  }
  setName(name){this.name=name;}
  async stop(){
@@ -371,29 +715,36 @@ function transferBatches(files){
 
 
 
+
 const $ = id => document.getElementById(id);
 const number=(n,digits=0)=>new Intl.NumberFormat(undefined,{maximumFractionDigits:digits}).format(n);
 const fmt = n => n<1024?`${number(n)} B`:n<1048576?`${number(n/1024,1)} KB`:n<1073741824?`${number(n/1048576,1)} MB`:`${number(n/1073741824,2)} GB`;
-let queuedBatches=[],queueMember=null,queueTimer,preparingSelection=false;
+const transfers=new Map(),peerQueues=new Map(),cancelBarriers=new Map(),cancelledTransfers=new Map();
+let offeredTransfer=null,preparingSelection=false;
 let room, mode=null, files=[], members=[], active, directory,trust,resumeRecord;
 let selectedMember,preparedConnection,preparingDevice=false,prepareGeneration=0,latestDiagnosis;
-const deviceId=identity();let reconnectTimer,reconnectAttempts=0,presence,mainPeer,onlineUsers=[];const connectedOnline=new Map();
+const deviceId=identity();let presence,mainPeer,onlineUsers=[];const connectedOnline=new Map();
 let onlineRetryTimer;
 let connecting=false, attempt=0, lastAttempt, wakeLock, acquiringWake=false, pendingConnectionDecision;
+const connectionRequests=[];
 const downloads=[], cards=new Map();
 let history=[];
 function notice(text,error=false) { $('status').textContent=text; $('status').className=error?'status error':'status'; }
 function debug(text){if(!$('debug-enabled').checked)return;const log=$('debug-log');log.textContent=(log.textContent+'\n'+new Date().toLocaleTimeString()+' '+text).split('\n').slice(-100).join('\n');}
 function requestConnectionApproval(member){
-  if(pendingConnectionDecision)return Promise.resolve(false);
-  $('connection-request-note').textContent=`${member.name} wants to connect. Accepting permits either device to request file transfers; every transfer will still need separate approval.`;
-  $('connection-request').showModal();$('reject-connection').focus();notice(`Connection request from ${member.name}. Accept or reject it.`);
-  return new Promise(resolve=>{pendingConnectionDecision=accepted=>{pendingConnectionDecision=null;if($('connection-request').open)$('connection-request').close();resolve(accepted);};});
+ return new Promise(resolve=>{connectionRequests.push({member,resolve});showConnectionRequest();});
+}
+function showConnectionRequest(){
+ if(pendingConnectionDecision||!connectionRequests.length)return;
+ const {member,resolve}=connectionRequests.shift();
+ $('connection-request-note').textContent=`${member.name} wants to connect. Accepting permits either device to request file transfers; every transfer will still need separate approval.`;
+ $('connection-request').showModal();$('reject-connection').focus();notice(`Connection request from ${member.name}. Accept or reject it.`);
+ pendingConnectionDecision=accepted=>{pendingConnectionDecision=null;if($('connection-request').open)$('connection-request').close();resolve(accepted);setTimeout(showConnectionRequest,0);};
 }
 $('accept-connection').onclick=()=>pendingConnectionDecision?.(true);
 $('reject-connection').onclick=()=>pendingConnectionDecision?.(false);
 $('connection-request').addEventListener('cancel',event=>{event.preventDefault();pendingConnectionDecision?.(false);});
-const directoryRoom={connect:(id,transferId)=>mainPeer.connect(id,transferId),probe:(id,timeout)=>mainPeer.probe(id,timeout)};
+const directoryRoom={cancelTransfer:(peer,id)=>mainPeer.cancelTransfer(peer,id),connect:(id,transferId)=>mainPeer.connect(id,transferId),probe:(id,timeout)=>mainPeer.probe(id,timeout)};
 function directoryMember(user){return {id:user.peerId,deviceId:user.uuid,name:user.name,mode:'receive',onlineDirectory:true,room:directoryRoom};}
 function renderOnlineUsers(users=[]){
  onlineUsers=users.filter((u,i)=>u.uuid!==deviceId&&users.findIndex(x=>x.uuid===u.uuid)===i);
@@ -410,7 +761,7 @@ function renderOnlineUsers(users=[]){
 function presenceState(state,detail){$('online-state').textContent=detail||state;debug('Online presence: '+state);}
 async function ensureMainPeer(){
  await nameReady;await startupStorageReady;await networkReady;
- if(!mainPeer)mainPeer=new MainPeerManager({uuid:deviceId,name:$('device-name').value,onIncoming:(conn,m)=>awaitTransfer(conn,{...m,room:directoryRoom}),onConnectionRequest:requestConnectionApproval,onConnected:member=>{connectedOnline.set(member.deviceId,{...member,room:directoryRoom});notice(`${member.name} connected. Either device can send or receive files.`);$('connection-state').textContent='Connected · send or receive';renderOnlineUsers(onlineUsers);},onDisconnected:member=>{connectedOnline.delete(member.deviceId);$('connection-state').textContent=allMembers().length?'Connected · send or receive':'Disconnected';renderOnlineUsers(onlineUsers);},onState:(state,detail)=>debug(`Main Peer 1 ${state}${detail?' · '+detail:''}`)});
+ if(!mainPeer)mainPeer=new MainPeerManager({uuid:deviceId,name:$('device-name').value,onIncoming:(conn,m)=>awaitTransfer(conn,{...m,room:directoryRoom}),onConnectionRequest:requestConnectionApproval,onCancel:remoteCancel,onConnected:member=>{connectedOnline.set(member.deviceId,{...member,room:directoryRoom});notice(`${member.name} connected. Either device can send or receive files.`);$('connection-state').textContent='Connected · send or receive';renderOnlineUsers(onlineUsers);},onDisconnected:member=>{connectedOnline.delete(member.deviceId);$('connection-state').textContent=allMembers().length?'Connected · send or receive':'Disconnected';renderOnlineUsers(onlineUsers);},onState:(state,detail)=>debug(`Main Peer 1 ${state}${detail?' · '+detail:''}`)});
  const id=await mainPeer.start();
  if(!mainPeer.leader||!mainPeer.peer)throw Error('Online connection is active in another tab. Use that tab, or close it and retry here.');
  return id;
@@ -430,20 +781,40 @@ async function setOnline(enabled){
 const networkReady=configureNetwork().catch(e=>debug(e.message));
 function save() {}
 function el(tag,text,className) {const e=document.createElement(tag);if(text!==undefined)e.textContent=text;e.dir='auto';if(className)e.className=className;return e;}
-const busy = () => active&&!active.terminal();
+const busy = () => [...transfers.values()].some(entry=>!entry.transfer.terminal());
+const sendingTo=id=>[...transfers.values()].some(e=>e.member.deviceId===id&&e.transfer.direction==='send'&&!e.transfer.terminal());
+function remoteCancel(id,member){
+ const entry=transfers.get(id);
+ if(entry&&entry.member.deviceId===member.deviceId){entry.transfer.cancel(false);return true;}
+ return cancelledTransfers.get(id)===member.deviceId;
+}
+async function notifyCancellation(id,member){
+ if(member.room.cancelTransfer)return member.room.cancelTransfer(member.id,id);
+ return (await member.room.message(member.id,{type:'transfer-cancel',id}))?.cancelled===true;
+}
 const retainedBytes = () => downloads.reduce((n,d)=>n+d.size,0);
 function drawHistory() {
   $('history').replaceChildren(); cards.clear();
   if(!history.length) {$('history').append(el('p','No transfers yet.','muted'));return;}
   for(const row of history) {
     const card=el('article',undefined,'history-card'), title=el('strong'), detail=el('p',undefined,'muted'), progress=el('progress'), label=el('span');
-    progress.max=100;card.append(title,detail,progress,label);$('history').append(card);
-    cards.set(row.id,{title,detail,progress,label});updateCard(row);
+    const actions=el('div',undefined,'actions'),pause=el('button','Pause','secondary'),resume=el('button','Resume','secondary'),cancel=el('button','Cancel','secondary');
+    for(const button of [pause,resume,cancel])button.type='button';
+    pause.onclick=()=>transfers.get(row.id)?.transfer.pause();
+    resume.onclick=()=>{const t=transfers.get(row.id)?.transfer;if(t){t.reconnectAttempts=0;t.resume();}};
+    cancel.onclick=()=>transfers.get(row.id)?.transfer.cancel();
+    actions.append(pause,resume,cancel);
+    progress.max=100;card.append(title,detail,progress,label,actions);$('history').append(card);
+    cards.set(row.id,{title,detail,progress,label,actions,pause,resume,cancel});updateCard(row);
   }
 }
 const stateLabel={connecting:'Connecting',waiting:'Waiting for receiver to accept',offered:'Waiting for your approval',preparing:'Preparing storage',transferring:'Transferring',paused:'Paused',reconnecting:'Connection interrupted — progress saved',verifying:'Verifying saved file',complete:'Verified complete ✓',failed:'Stopped — check saved progress',declined:'Declined',cancelled:'Cancelled'};
 function updateCard(row) {
   const c=cards.get(row.id);if(!c)return;
+  const terminal=['complete','failed','declined','cancelled'].includes(row.state);
+  c.actions.hidden=terminal;c.pause.hidden=!['transferring','paused'].includes(row.state)||!!row.localPaused;
+  c.resume.hidden=!(row.localPaused||row.state==='reconnecting');
+  c.cancel.setAttribute('aria-label',`Cancel transfer ${row.direction==='send'?'to':'from'} ${row.peer}`);
   c.title.textContent=`${row.direction==='send'?'↑ To':'↓ From'} ${row.peer} · ${row.files.length} file${row.files.length===1?'':'s'}`;
   c.detail.textContent=row.files.map(f=>f.name).join(', ');
   c.progress.value=row.total?Math.min(100,row.bytes/row.total*100):row.state==='complete'?100:0;
@@ -451,7 +822,6 @@ function updateCard(row) {
   const percent=row.total?Math.min(100,row.bytes/row.total*100):row.state==='complete'?100:0;c.label.textContent=`${stateLabel[row.state]||row.state} · ${number(percent,percent<10?1:0)}% · ${fmt(row.bytes||0)} / ${fmt(row.total||0)}${row.speed?' · '+fmt(row.speed)+'/s':''}${row.eta?' · about '+Math.ceil(row.eta/60)+' min left':''}${row.state==='verifying'?' · '+fmt(row.verifiedBytes||0)+' checked':''}${row.detail?' · '+row.detail:''}`;
 }
 function setMode(next) {
-  if(busy()) {notice('Finish or cancel this transfer before changing mode.',true);return;}
   mode=next;room?.setMode(mode);trust?.setMode(mode);
   if(next!=='send')resetPrepared();
   $('transfer').classList.toggle('selected',!!mode);$('transfer').setAttribute('aria-pressed',String(!!mode));
@@ -464,18 +834,18 @@ function renderDevices() {
   const available=allMembers();
   const checking=[...(trust?.rooms.values()||[])].some(entry=>['connecting','reconnecting'].includes(entry.room.state));
   $('discovery-status').textContent=available.length?`${available.length} available device${available.length===1?'':'s'} found. Choose Send beside the device you want to send files to.`:checking?'Checking your remembered devices…':'No devices available yet. Use Online discovery, scan a QR, or enter a connection code.';
-  if(selectedMember&&!busy()&&!available.some(m=>m.deviceId===selectedMember.deviceId))resetPrepared();
-  const ready=mode==='send'&&!!selectedMember&&(preparedConnection===true||!!preparedConnection?.open)&&!busy();
-  $('send-panel').hidden=!ready&&!busy();
+  if(selectedMember&&!available.some(m=>m.deviceId===selectedMember.deviceId))resetPrepared();
+  const ready=mode==='send'&&!!selectedMember&&(preparedConnection===true||!!preparedConnection?.open);
+  $('send-panel').hidden=!ready;
   if(mode!=='send')$('send-panel').hidden=true;
-  $('file-picker').disabled=$('folder-picker').disabled=!ready||!!busy();
+  $('file-picker').disabled=$('folder-picker').disabled=!ready||preparingSelection;
   $('target-name').textContent=selectedMember?`Connected to ${selectedMember.name}. Select files to request transfer immediately.`:'Connect to a receiver first.';
   for(const m of available) {
     const row=el('div',undefined,'device'),identity=el('div',undefined,'device-details');
     identity.append(el('strong',m.name),el('span',preparingDevice&&selectedMember?.deviceId===m.deviceId?'Checking connection…':'Connected · ready to send or receive','muted'));
     const send=el('button','Send','secondary');
     send.setAttribute('aria-label','Send files to '+m.name);
-    send.disabled=!!busy()||preparingDevice;send.onclick=()=>prepareReceiver(m);
+    send.disabled=preparingDevice;send.onclick=()=>prepareReceiver(m);
     row.append(el('span','▣','device-icon'),identity,send);$('devices').append(row);
   }
   $('connected-panel').hidden=!available.length;$('connected-devices').replaceChildren();
@@ -505,26 +875,35 @@ function roomState(state,detail='') {
   if(detail)notice(detail,state==='disconnected');renderDevices();
 }
 function renderQueue(){
- $('send-queue').textContent=queuedBatches.length?`${number(queuedBatches.reduce((n,b)=>n+b.length,0))} files waiting in ${number(queuedBatches.length)} batches.`:'';
- $('continue-queue').hidden=!queuedBatches.length;$('continue-queue').disabled=!!busy();$('clear-queue').hidden=!queuedBatches.length;
+ const pending=[...peerQueues.values()].filter(q=>q.batches.length);
+ $('send-queue').textContent=pending.map(q=>`${q.member.name}: ${number(q.batches.reduce((n,b)=>n+b.length,0))} files queued${q.paused?' (paused)':''}`).join(' · ');
+ $('continue-queue').hidden=!pending.some(q=>q.paused);$('continue-queue').disabled=false;
+ $('clear-queue').hidden=!pending.length;
 }
-function nextBatch(){
- if(busy()||!queuedBatches.length)return;
- const current=allMembers().find(m=>m.deviceId===queueMember?.deviceId);
- if(!current){notice('Reconnect the receiver, then choose Continue queue.',true);renderQueue();return;}
- queueMember=current;files=queuedBatches[0];if(startSend(current))queuedBatches.shift();renderQueue();
+function nextBatch(peerId){
+ const queue=peerQueues.get(peerId);
+ if(!queue||queue.paused||!queue.batches.length||sendingTo(peerId)||cancelBarriers.has(peerId))return;
+ const current=allMembers().find(m=>m.deviceId===peerId);
+ if(!current){queue.paused=true;notice('Reconnect '+queue.member.name+', then choose Continue queue.',true);renderQueue();return;}
+ const batch=queue.batches[0];
+ if(startSend(current,undefined,batch))queue.batches.shift();else queue.paused=true;
+ if(!queue.batches.length)peerQueues.delete(peerId);
+ renderQueue();
 }
-$('continue-queue').onclick=nextBatch;
-$('clear-queue').onclick=()=>{clearTimeout(queueTimer);queuedBatches=[];queueMember=null;renderQueue();notice('Remaining queued files cleared.');};
+$('continue-queue').onclick=()=>{for(const [id,q] of peerQueues){q.paused=false;nextBatch(id);}};
+$('clear-queue').onclick=()=>{peerQueues.clear();renderQueue();notice('Remaining queued files cleared. Active transfers continue.');};
 function controls() {
-  const locked=!!busy();
-  $('create-room').disabled=$('join-room').disabled=connecting||(locked&&active.state!=='reconnecting');
+  const locked=!!busy();if(!active||active.terminal())active=[...transfers.values()].find(e=>!e.transfer.terminal())?.transfer;
+  $('create-room').disabled=$('join-room').disabled=connecting||(locked&&active?.state!=='reconnecting');
   $('transfer').disabled=locked;
-  $('cancel-connection').hidden=!connecting; $('cancel').hidden=!locked;
+  $('cancel-connection').hidden=!connecting; $('cancel').hidden=true;
   $('clear-history').disabled=locked;
-  $('pause').hidden=!active||!['transferring','paused'].includes(active.state)||active.localPaused;
-  $('resume').hidden=!active||!(active.localPaused||active.state==='reconnecting');
-  $('active-summary').textContent=locked?`${stateLabel[active.state]} · ${fmt(active.bytes)} / ${fmt(active.total)}`:'';
+  $('pause').hidden=true;
+  $('resume').hidden=true;
+  const live=[...transfers.values()].filter(e=>!e.transfer.terminal());
+  $('active-summary').textContent=locked?`${number(live.length)} active transfers · Controls are on each transfer card below.`:'';
+  const total=live.reduce((n,e)=>n+e.transfer.total,0),bytes=live.reduce((n,e)=>n+e.transfer.bytes,0);
+  $('transfer-percent').textContent=locked&&total?number(Math.min(100,bytes/total*100),1)+'%':'';
   $('leave-room').hidden=!room||connecting;
   renderDevices();renderQueue();$('clear-downloads').disabled=locked;void maintainWakeLock();
 }
@@ -541,20 +920,28 @@ async function maintainWakeLock() {
   } catch {$('awake-status').textContent='Screen wake lock unavailable. Keep the device awake manually.';}
   finally {acquiringWake=false;}
 }
-function closeRequest() {if($('incoming').open)$('incoming').close();}
+function closeRequest() {if($('incoming').open)$('incoming').close();offeredTransfer=null;}
+function showNextOffer(){
+ if(offeredTransfer?.state==='offered')return;
+ const entry=[...transfers.values()].find(e=>e.transfer.state==='offered');
+ if(!entry)return;offeredTransfer=entry.transfer;
+ $('request-title').textContent=`${entry.member.name} wants to send ${offeredTransfer.manifest.length} files`;
+ $('request-files').textContent=offeredTransfer.manifest.map(f=>`${f.name} (${fmt(f.size)})`).join('\n');
+ void refreshAcceptance();if(!$('incoming').open)$('incoming').showModal();$('decline').focus();
+}
 let acceptanceGeneration=0;
 async function refreshAcceptance() {
-  if(active?.state!=='offered')return;
-  const transfer=active,generation=++acceptanceGeneration;
+  if(offeredTransfer?.state!=='offered')return;
+  const transfer=offeredTransfer,generation=++acceptanceGeneration;
   $('accept').disabled=true;
   $('request-note').textContent='Checking space for the download…';
   try {
     const availability=await storageAvailability(transfer.total);
-    if(active!==transfer||generation!==acceptanceGeneration)return;
+    if(offeredTransfer!==transfer||generation!==acceptanceGeneration)return;
     const supported=availability.opfs||availability.indexedDB&&transfer.total<=256*1024*1024;
     $('accept').disabled=!supported||!availability.enough;
     $('request-note').textContent=!supported?'This browser needs persistent file storage for downloads larger than 256 MB. Try a current browser.':!availability.enough?'Not enough browser storage to prepare these files. Free space or send a smaller batch.':'Accept to receive verified files in your browser Downloads. Allow multiple downloads if asked. A Download button remains available if your browser blocks automatic downloads.';
-  }catch(error){if(active===transfer)$('request-note').textContent='Could not check download storage: '+error.message;}
+  }catch(error){if(offeredTransfer===transfer)$('request-note').textContent='Could not check download storage: '+error.message;}
 }
 function receivedFile(file) {
   const line=el('div',undefined,'download');
@@ -589,51 +976,89 @@ async function clearCompletedDownloads(silent=false){
   finally{$('clear-downloads').disabled=!!busy();}
 }
 $('clear-downloads').onclick=()=>clearCompletedDownloads();
-function track(conn,member,outgoing,record) {
-  active?.conn.close();
-  const row={id:record?.transferId||conn.metadata?.transferId||crypto.randomUUID(),peer:member.name,direction:outgoing?'send':'receive',state:'connecting',files:[],bytes:0,total:0,time:new Date().toISOString()};
-  history.unshift(row);history=history.slice(0,50);drawHistory();save();
-  $('history').closest('details').open=true;
-  const t=new BlockTransfer(conn,{files:outgoing?[...files]:undefined,record,id:record?.transferId||conn.metadata?.transferId,senderId:outgoing?deviceId:member.deviceId,receiverId:outgoing?member.deviceId:deviceId,reselected:!!record,requireDirectory:false,onUpdate:update=>{
-    const changed=row.state!==update.state,advanced=update.bytes>row.bytes;Object.assign(row,update);updateCard(row);if(changed){save();debug(`${update.direction} ${update.state}: ${fmt(update.bytes)} verified bytes`);}else if(advanced)debug(`${update.direction}: ${fmt(update.bytes)} acknowledged and saved`);
-    const terminal=['complete','failed','cancelled','declined'].includes(update.state);
-    if(terminal) {
-      save();closeRequest();clearTimeout(reconnectTimer);reconnectAttempts=0;
-      if((['cancelled','declined'].includes(update.state)||update.state==='complete'&&outgoing)&&!t.cleanupStarted){t.cleanupStarted=true;void (async()=>{try{if(update.state==='complete')await t.storage?.cleanup();if(t.record?.id)await records.remove(t.record.id);}catch(e){debug('Terminal cleanup: '+e.message);}finally{void renderRecovery();}})();}else void renderRecovery();
-      if(active===t)active=null;
-      if(outgoing&&queuedBatches.length){clearTimeout(queueTimer);if(update.state==='complete')queueTimer=setTimeout(nextBatch,750);else notice('Queue paused. Use Continue queue when you are ready.');}
-      notice(update.state==='complete'?(outgoing?'Delivered and verified on the receiver. Downloads are ready there.':'Received and verified. Check browser Downloads, or use the Download buttons below.'):update.detail,update.state!=='complete');
-      if(!outgoing&&update.state==='complete')$('received-section').scrollIntoView({behavior:'smooth',block:'center'});
-    } else if(update.state==='transferring')notice(`${outgoing?'Sending':'Receiving'}: ${fmt(update.bytes)} of ${fmt(update.total)}. Keep both pages open.`);
-    setTimeout(controls,0);
-  },onInterrupted:transfer=>{if(transfer.direction==='send')scheduleReconnect(transfer,member);else if(!transfer.record)transfer.fail('The sender disconnected before the transfer was accepted.','failed',false);},onOffer:manifest=>{
-    $('request-title').textContent=`${member.name} wants to send ${manifest.length} file${manifest.length===1?'':'s'}`;
-    $('request-files').textContent=manifest.map(f=>`${f.name} (${fmt(f.size)})`).join('\n');
-    void refreshAcceptance();$('incoming').showModal();$('decline').focus();
-  },onFile:file=>receivedFile({...file,transferId:t.id})});
-  active=t;controls();return t;
+function track(conn,member,outgoing,record,batch=files) {
+ const row={id:record?.transferId||conn.metadata?.transferId||crypto.randomUUID(),peer:member.name,direction:outgoing?'send':'receive',state:'connecting',files:[],bytes:0,total:0,time:new Date().toISOString()};
+ history.unshift(row);history=history.slice(0,Math.max(50,transfers.size+1));drawHistory();$('history').closest('details').open=true;
+ const t=new BlockTransfer(conn,{files:outgoing?[...batch]:undefined,record,id:row.id,senderId:outgoing?deviceId:member.deviceId,receiverId:outgoing?member.deviceId:deviceId,reselected:!!record,requireDirectory:false,
+ onCancel:id=>notifyCancellation(id,member),onCleanupError:error=>{debug('Cleanup needs retry: '+error.message);void renderRecovery();},
+ onUpdate:update=>{
+  const terminal=['complete','failed','cancelled','declined'].includes(update.state);
+  Object.assign(row,update);updateCard(row);
+  if(terminal){
+   if(row.finished)return;row.finished=true;
+   clearTimeout(t.reconnectTimer);clearTimeout(t.connectTimer);
+   if(offeredTransfer===t)closeRequest();
+   transfers.delete(t.id);if(active===t)active=null;
+   if(update.state==='cancelled'){
+    cancelledTransfers.set(t.id,member.deviceId);
+    if(cancelledTransfers.size>100)cancelledTransfers.delete(cancelledTransfers.keys().next().value);
+    if(outgoing)peerQueues.delete(member.deviceId);
+    if(t.cancelAcknowledged){
+     const barrier=t.cancelAcknowledged;cancelBarriers.set(member.deviceId,barrier);
+     void barrier.finally(()=>{if(cancelBarriers.get(member.deviceId)===barrier)cancelBarriers.delete(member.deviceId);nextBatch(member.deviceId);});
+    }
+   }
+   if(t.cleanupPromise)void t.cleanupPromise.catch(()=>{}).then(renderRecovery);
+   else if(outgoing&&update.state==='complete')void records.remove(t.record.id).then(renderRecovery).catch(e=>debug(e.message));
+   else void renderRecovery();
+   if(outgoing&&peerQueues.has(member.deviceId)){
+    if(update.state==='complete')setTimeout(()=>nextBatch(member.deviceId),0);
+    else peerQueues.get(member.deviceId).paused=true;
+   }
+   notice(update.state==='complete'?`${member.name}: ${outgoing?'delivered and verified.':'received; check Downloads.'}`:member.name+': '+update.detail,update.state!=='complete');
+   setTimeout(showNextOffer,0);
+  }
+  controls();
+ },onInterrupted:transfer=>{if(transfer.direction==='send')scheduleReconnect(transfer,member);else if(!transfer.record)transfer.fail('The sender disconnected before acceptance.','failed',false);},
+ onOffer:()=>showNextOffer(),
+ onFile:file=>receivedFile({...file,transferId:t.id})});
+ transfers.set(t.id,{transfer:t,member,row});active=t;controls();return t;
 }
-function startSend(member,record) {
-  if(busy())return;
-  try {manifestFor(files);const id=record?.transferId||crypto.randomUUID();const connection=!record&&preparedConnection?.open?preparedConnection:member.room.connect(member.id,id);preparedConnection=null;track(connection,member,true,record);debug('Files selected; transfer channel opened to the selected device.');notice(`Waiting for ${member.name} to accept. Sending starts immediately after acceptance.`);return true;}
-  catch(e) {notice(e.message,true);return false;}
+function startSend(member,record,batch=files) {
+ if(sendingTo(member.deviceId)||cancelBarriers.has(member.deviceId)){notice('This device already has an outgoing transfer. Additional selections are queued.',true);return false;}
+ try{
+  manifestFor(batch);const id=record?.transferId||crypto.randomUUID();
+  const connection=member.room.connect(member.id,id);
+  track(connection,member,true,record,batch);
+  notice('Waiting for '+member.name+' to accept. Other peer transfers can continue.');return true;
+ }catch(error){notice(error.message,true);return false;}
 }
 function resetPrepared(){prepareGeneration++;const conn=preparedConnection;preparedConnection=null;selectedMember=null;preparingDevice=false;if(conn?.close&&conn!==active?.conn)conn.close();}
 async function prepareReceiver(member){
-  if(busy()){notice('A transfer is already active. Finish or cancel it before selecting another receiver.',true);return;}
   if(!member){notice('That connected device is unavailable.',true);return;}
   if((preparedConnection===true||preparedConnection?.open)&&selectedMember?.deviceId===member.deviceId){$('send-panel').scrollIntoView({behavior:'smooth',block:'center'});return;}
   if(mode!=='send')setMode('send');resetPrepared();const generation=prepareGeneration;selectedMember=member;preparingDevice=true;renderDevices();notice(`Opening a secure file connection to ${member.name}…`);
-  try{const probe=await member.room.probe(member.id,20000);probe.close();if(generation!==prepareGeneration||busy())return;preparedConnection=true;preparingDevice=false;notice(`Connection confirmed with ${member.name}. Choose files to send; this device can also receive.`);renderDevices();$('send-panel').scrollIntoView({behavior:'smooth',block:'center'});}catch{await failPrepared(member,generation);}
+  try{const probe=await member.room.probe(member.id,20000);probe.close();if(generation!==prepareGeneration)return;preparedConnection=true;preparingDevice=false;notice(`Connection confirmed with ${member.name}. Choose files to send; this device can also receive.`);renderDevices();$('send-panel').scrollIntoView({behavior:'smooth',block:'center'});}catch{await failPrepared(member,generation);}
 }
-async function failPrepared(member,generation){if(generation!==prepareGeneration||busy())return;preparedConnection=null;preparingDevice=false;latestDiagnosis=await connectionDiagnosis();if(generation!==prepareGeneration)return;notice(failedChannelMessage(member.name,latestDiagnosis),true);$('network-result').textContent=latestDiagnosis.summary;renderDevices();}
+async function failPrepared(member,generation){if(generation!==prepareGeneration)return;preparedConnection=null;preparingDevice=false;latestDiagnosis=await connectionDiagnosis();if(generation!==prepareGeneration)return;notice(failedChannelMessage(member.name,latestDiagnosis),true);$('network-result').textContent=latestDiagnosis.summary;renderDevices();}
 function awaitTransfer(conn,member){
   incoming(conn,member);
 }
-function scheduleReconnect(t,member){if(t!==active||t.terminal()||t.direction!=='send')return;clearTimeout(reconnectTimer);if(reconnectAttempts>=4){notice('Automatic retries stopped. Keep both pages open, reconnect if needed, then tap Resume.',true);return;}reconnectTimer=setTimeout(()=>{if(t!==active||t.terminal())return;reconnectAttempts++;const current=allMembers().find(m=>m.deviceId===member.deviceId);try{if(!current)throw Error('Receiver offline');debug('Reconnection attempt '+reconnectAttempts);t.attach(current.room.connect(current.id,t.id));setTimeout(()=>{if(t===active&&t.state==='connecting'){t.interrupted('Connection retry timed out.');}},25000);}catch{scheduleReconnect(t,member);}},[1000,3000,8000,15000][reconnectAttempts]);}
-function incoming(conn,m){if(busy()){const senderId=active?.record?.senderId||active?.options?.senderId;if(active?.direction==='receive'&&conn.metadata?.transferId===active.id&&m.deviceId===senderId){active.attach(conn);return;}if(conn.open)conn.close();else conn.on('open',()=>conn.close());return;}if(conn.metadata?.kind!=='file-v3'){conn.close();return;}track(conn,m,false);}
+function scheduleReconnect(t,member){
+ if(t.terminal()||t.direction!=='send'||!transfers.has(t.id))return;
+ clearTimeout(t.reconnectTimer);t.reconnectAttempts=t.reconnectAttempts||0;
+ if(t.reconnectAttempts>=4){notice(member.name+': automatic retries stopped. Use Resume on its transfer card.',true);return;}
+ t.reconnectTimer=setTimeout(()=>{
+  if(t.terminal()||!transfers.has(t.id))return;t.reconnectAttempts++;
+  const current=allMembers().find(m=>m.deviceId===member.deviceId);
+  try{
+   if(!current)throw Error('Peer offline');t.attach(current.room.connect(current.id,t.id));
+   t.connectTimer=setTimeout(()=>{if(t.state==='connecting')t.interrupted('Connection retry timed out.');},25000);
+  }catch{scheduleReconnect(t,member);}
+ },[1000,3000,8000,15000][t.reconnectAttempts]);
+}
+function incoming(conn,member){
+ if(conn.metadata?.kind!=='file-v3'){conn.close();return;}
+ if(cancelledTransfers.has(conn.metadata.transferId)){conn.close();return;}
+ const existing=transfers.get(conn.metadata.transferId);
+ if(existing){
+  if(existing.transfer.direction==='receive'&&existing.member.deviceId===member.deviceId)existing.transfer.attach(conn);else conn.close();
+  return;
+ }
+ track(conn,member,false);
+}
 async function openRoom(host,codeOverride,collisions=0) {
-  if(busy()&&active.state!=='reconnecting')return;
+  if(busy()&&active?.state!=='reconnecting')return;
   let code;try{code=host?(codeOverride||newCode()):parseRoom(codeOverride||$('room-code').value);}catch(e){notice(e.message,true);$('room-code').focus();return;}
   if(!mode)setMode('send');
   const token=++attempt;
@@ -645,7 +1070,7 @@ async function openRoom(host,codeOverride,collisions=0) {
     onError:msg=>{if(token===attempt)notice(msg,true);},
     onState:(state,detail)=>{if(token===attempt)roomState(state,detail);},
     onTransfer:(conn,m)=>{if(token!==attempt){conn.close();return;}awaitTransfer(conn,{...m,room:candidate});},
-    onMessage:async(message,m,reply)=>{if(message?.type!=='remember'||busy()){reply({accepted:false});return;}if(!confirm(`Remember ${m.name}? They will be able to find this device when both pages are open. You still approve each file transfer.`)){reply({accepted:false});return;}try{await trust.add(m,message.secret);reply({accepted:true});notice('Device remembered.');}catch(e){reply({accepted:false});notice(e.message,true);}}
+    onMessage:async(message,m,reply)=>{if(message?.type==='transfer-cancel'){reply({cancelled:remoteCancel(message.id,m)});return;}if(message?.type!=='remember'||busy()){reply({accepted:false});return;}if(!confirm(`Remember ${m.name}? They will be able to find this device when both pages are open. You still approve each file transfer.`)){reply({accepted:false});return;}try{await trust.add(m,message.secret);reply({accepted:true});notice('Device remembered.');}catch(e){reply({accepted:false});notice(e.message,true);}}
   },{deviceId});room=candidate;
   try {
     await startupStorageReady;await networkReady;if(token!==attempt)return;
@@ -676,7 +1101,7 @@ async function renderRecovery(){
   const saved=list.filter(r=>!['cancelled','declined'].includes(r.state)&&!(r.direction==='send'&&r.state==='complete'));
   $('recovery-section').hidden=!saved.length;
   for(const record of saved){const row=el('article',undefined,'history-card');row.append(el('strong',record.manifest.map(f=>f.name).join(', ')),el('p',`${record.direction==='send'?'Sending':'Receiving'} · ${record.state==='complete'?'Verified files saved': 'Verified blocks preserved'}`,'muted'));
-    if(record.direction==='send'){const resume=el('button','Reselect files & resume','secondary');resume.onclick=()=>{if(busy()){notice('Finish or cancel the active transfer first.',true);return;}const peer=allMembers().find(m=>m.deviceId===record.receiverId);if(!peer){notice('Reconnect the original receiver first, using Online discovery, its invitation, or remembered device.',true);return;}resumeRecord=record;const folder=record.sourceFolder||record.manifest.some(f=>f.path.includes('/'));$(folder?'resume-folder-picker':'resume-picker').click();};row.append(resume);}
+    if(record.direction==='send'){const resume=el('button','Reselect files & resume','secondary');resume.onclick=()=>{if(sendingTo(record.receiverId)||cancelBarriers.has(record.receiverId)){notice('Wait for the current transfer to this device to finish.',true);return;}const peer=allMembers().find(m=>m.deviceId===record.receiverId);if(!peer){notice('Reconnect the original receiver first, using Online discovery, its invitation, or remembered device.',true);return;}resumeRecord=record;const folder=record.sourceFolder||record.manifest.some(f=>f.path.includes('/'));$(folder?'resume-folder-picker':'resume-picker').click();};row.append(resume);}
     else {
       if(record.storage==='directory'){const allow=el('button','Allow destination access','secondary');allow.onclick=async()=>{try{if(await record.directory.requestPermission({mode:'readwrite'})!=='granted')throw Error('Folder permission was not granted.');notice('Folder ready. Resume from the sender.');}catch(e){notice(e.message,true);}};row.append(allow);}
       if(record.files.some(f=>f.complete)){const restore=el('button','Show received files','secondary');restore.onclick=async()=>{try{const storage=await BlockStorage.open(record);for(let f=0;f<record.files.length;f++)if(record.files[f].complete)receivedFile({...record.manifest[f],...await storage.completedFile(f),transferId:record.transferId});notice('Verified files shown below.');}catch(e){notice(e.message,true);}};row.append(restore);}
@@ -684,9 +1109,9 @@ async function renderRecovery(){
     const remove=el('button','Remove saved data','text-button');remove.onclick=async()=>{if(busy()){notice('Finish or cancel the active transfer first.',true);return;}if(!confirm('Remove this saved transfer and its temporary browser files? Files already downloaded to your device remain.'))return;try{if(record.direction==='receive'){const storage=await BlockStorage.open(record);await storage.cleanup();}await records.remove(record.id);await renderRecovery();}catch(e){notice(e.message,true);}};row.append(remove);$('recoveries').append(row);
   }}catch(e){debug('Saved progress unavailable: '+e.message);}
 }
-async function resumeSelected(event){if(queuedBatches.length){event.target.value='';notice('Continue or clear the queued files before resuming another transfer.',true);return;}if(!resumeRecord||!event.target.files.length)return;files=[...event.target.files];const record=resumeRecord;resumeRecord=null;const peer=allMembers().find(m=>m.deviceId===record.receiverId);if(!peer){notice('Receiver disconnected. Reconnect and try again.',true);return;}setMode('send');try{if(record.sourceFolder)files=[await folderArchive(files)];const manifest=manifestFor(files);files=record.manifest.map(meta=>{const index=manifest.findIndex(f=>JSON.stringify(f)===JSON.stringify(meta));if(index<0)throw Error('Choose the same original files or folder to resume.');return files[index];});startSend(peer,record);}catch(e){notice(e.message,true);}event.target.value='';}
+async function resumeSelected(event){if(!resumeRecord||!event.target.files.length)return;files=[...event.target.files];const record=resumeRecord;resumeRecord=null;const peer=allMembers().find(m=>m.deviceId===record.receiverId);if(!peer){notice('Receiver disconnected. Reconnect and try again.',true);return;}setMode('send');try{if(record.sourceFolder)files=[await folderArchive(files)];const manifest=manifestFor(files);files=record.manifest.map(meta=>{const index=manifest.findIndex(f=>JSON.stringify(f)===JSON.stringify(meta));if(index<0)throw Error('Choose the same original files or folder to resume.');return files[index];});startSend(peer,record);}catch(e){notice(e.message,true);}event.target.value='';}
 $('resume-picker').onchange=$('resume-folder-picker').onchange=resumeSelected;
-$('pause').onclick=()=>active?.pause();$('resume').onclick=()=>{reconnectAttempts=0;active?.resume();};
+$('pause').onclick=()=>active?.pause();$('resume').onclick=()=>{if(active){active.reconnectAttempts=0;active.resume();}};
 $('debug-enabled').onchange=()=>{$('debug-log').hidden=!$('debug-enabled').checked;};
 function joinInvitation(value,requireLink=false) {
   if(busy()){notice('Finish or cancel the active transfer before scanning another invitation.',true);return;}
@@ -704,8 +1129,7 @@ $('scanner-dialog').addEventListener('close',()=>scanner.stop());
 document.addEventListener('visibilitychange',()=>{if(document.hidden&&$('scanner-dialog').open){scanner.stop();$('scanner-dialog').close();}});
 $('transfer').onclick=()=>{if(busy())return;setMode('send');if(!room)void openRoom(true);$('pairing-panel').scrollIntoView({behavior:'smooth',block:'start'});};
 async function selectFiles(e){
-  if(!selectedMember||!(preparedConnection===true||preparedConnection?.open)||busy()||preparingSelection){e.target.value='';notice('Confirm the receiver connection before choosing files.',true);return;}
-  if(queuedBatches.length){e.target.value='';notice('Continue or clear your existing queue before adding another selection.',true);return;}
+  if(!selectedMember||!(preparedConnection===true||preparedConnection?.open)||preparingSelection){e.target.value='';notice('Confirm the receiver connection before choosing files.',true);return;}
   const selected=[...e.target.files],isFolder=e.target.id==='folder-picker';e.target.value='';
   if(!selected.length)return;
   const destination=selectedMember;preparingSelection=true;
@@ -713,11 +1137,12 @@ async function selectFiles(e){
     notice(isFolder?'Preparing folder information…':'Preparing file queue…');
     const chosen=isFolder?[await folderArchive(selected)]:selected;
     const batches=transferBatches(chosen);
-    if(busy()||selectedMember?.deviceId!==destination.deviceId)throw Error('Receiver changed. Select the files again.');
-    queuedBatches=batches;queueMember=destination;
+    if(selectedMember?.deviceId!==destination.deviceId)throw Error('Receiver changed. Select the files again.');
+    const queue=peerQueues.get(destination.deviceId)||{member:destination,batches:[],paused:false};
+    queue.batches.push(...batches);queue.paused=false;peerQueues.set(destination.deviceId,queue);
     $('selection').textContent=isFolder?`${number(selected.length)} files in ${chosen[0].name} · ${fmt(chosen[0].size)}`:`${number(selected.length)} files · ${number(batches.length)} batches`;
-    nextBatch();
-  }catch(error){notice(error.message,true);}finally{preparingSelection=false;renderQueue();}
+    nextBatch(destination.deviceId);
+  }catch(error){notice(error.message,true);}finally{preparingSelection=false;renderDevices();renderQueue();}
 }
 $('file-picker').onchange=$('folder-picker').onchange=selectFiles;
 $('create-room').onclick=()=>openRoom(true);$('join-room').onclick=()=>joinInvitation($('room-code').value);
@@ -729,18 +1154,18 @@ $('copy-room').onclick=async()=>{if(!room)return;try{await navigator.clipboard.w
 $('copy-link').onclick=async()=>{if(!room)return;try{await navigator.clipboard.writeText(inviteUrl());notice('Invite link copied. Share it privately.');}catch{notice('Could not copy. Use the QR code or room code.');}};
 $('share-room').hidden=!navigator.share;
 $('share-room').onclick=async()=>{if(!room)return;try{await navigator.share({title:'Send files to my device',url:inviteUrl()});}catch(e){if(e.name!=='AbortError')notice('Use Copy link instead.');}};
-$('cancel').onclick=()=>active?.cancel();$('decline').onclick=()=>active?.decline();
-$('incoming').addEventListener('cancel',e=>{e.preventDefault();active?.decline();});
+$('cancel').onclick=()=>active?.cancel();$('decline').onclick=()=>offeredTransfer?.decline();
+$('incoming').addEventListener('cancel',e=>{e.preventDefault();offeredTransfer?.decline();});
 $('accept').onclick=async()=>{
-  if(active?.state!=='offered')return;
-  const transfer=active;
+  if(offeredTransfer?.state!=='offered')return;
+  const transfer=offeredTransfer;
   await refreshAcceptance();
-  if(active!==transfer||$('accept').disabled)return;
+  if(offeredTransfer!==transfer||$('accept').disabled)return;
   $('accept').disabled=true;
   const destination={storage:navigator.storage?.getDirectory?'opfs':'indexeddb'};
   await transfer.accept(destination);
   if(transfer.state==='failed')return;
-  closeRequest();controls();notice('Receiving and preparing your browser downloads…');
+  if(offeredTransfer===transfer)closeRequest();controls();showNextOffer();notice('Receiving and preparing your browser downloads…');
 };
 $('choose-folder').hidden=$('request-folder').hidden=true;
 $('direct-save-support').textContent='Verified files are downloaded using your browser. Your browser controls the download folder and may ask you to allow multiple downloads.';
@@ -770,7 +1195,7 @@ const nameReady=new Promise(resolve=>{
   $('welcome-name').oninput=()=>$('welcome-name').setCustomValidity('');
 });
 const startupStorageReady=performance.getEntriesByType('navigation')[0]?.type==='reload'?clearCompletedDownloads(true):Promise.resolve();
-trust=new TrustedDevices({id:deviceId,name:$('device-name').value,mode:'send',onChange:()=>{renderDevices();renderTrusted();},onTransfer:awaitTransfer,onConnectionRequest:requestConnectionApproval});
+trust=new TrustedDevices({id:deviceId,name:$('device-name').value,mode:'send',onChange:()=>{renderDevices();renderTrusted();},onTransfer:awaitTransfer,onConnectionRequest:requestConnectionApproval,onCancel:remoteCancel});
 debug('Startup: preparing identity, Main Peer 1, and remembered devices.');
 void nameReady.then(()=>startupStorageReady).then(()=>networkReady).then(async()=>{
   try{await ensureMainPeer();debug('Startup: Main Peer 1 is ready in this tab.');}
