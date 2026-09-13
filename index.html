@@ -8,7 +8,7 @@
 // Transfer diagnostics/history are session UI only. Never persist them in browser storage.
 try{localStorage.removeItem('wft-history-v2');const nativeSet=Storage.prototype.setItem;Storage.prototype.setItem=function(key,value){if(key==='wft-history-v2')return;return nativeSet.call(this,key,value);};}catch{}
 </script>
-<script type="module" src="./assets/app.js?v=4.6.4"></script>
+<script type="module" src="./assets/app.js?v=4.6.4-idb1"></script>
 </head><body><main>
 <header><a class="brand" href="./"><span class="brand-icon">⇄</span> File Transfer</a><span id="connection-state" class="badge">Your devices, connected</span></header>
 <div class="intro"><p class="eyebrow">NO ACCOUNT. NO INSTALL.</p><h1>Big files. Small effort.</h1><p class="muted">Open this page on both devices. Choose what you want to do.</p></div>

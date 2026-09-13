@@ -1,24 +1,26 @@
+import {createDatabaseConnection} from './database-connection.js';
 import {Integrity,blockHash} from './integrity.js';
 import {safeName} from './transfer.js';
 export const BLOCK_SIZE=8*1024*1024;
 export const MAX_FILE_SIZE=1024**4;
 const DB_NAME='wft-durable-v3';
 const CLEANUP_MS=48*60*60*1000;
-let database;
-export async function db() {
-  if(database)return database;
-  database=await new Promise((resolve,reject)=>{
-    const request=indexedDB.open(DB_NAME,1);
-    request.onupgradeneeded=()=>{for(const name of ['transfers','blocks','devices','settings'])request.result.createObjectStore(name,{keyPath:'id'});};
-    request.onsuccess=()=>resolve(request.result);request.onerror=()=>reject(request.error);
-  });return database;
-}
+const durableConnection=createDatabaseConnection(
+  {open:(...args)=>indexedDB.open(...args)},DB_NAME,1,
+  connection=>{for(const name of ['transfers','blocks','devices','settings'])connection.createObjectStore(name,{keyPath:'id'});}
+);
+export const db=()=>durableConnection.open();
 async function transact(store,operation,write=false) {
-  const database=await db();
+  const tx=await durableConnection.transaction(store,write?'readwrite':'readonly');
   return new Promise((resolve,reject)=>{
-    const tx=database.transaction(store,write?'readwrite':'readonly');let result;
-    const request=operation(tx.objectStore(store));request.onsuccess=()=>{result=request.result;};
-    tx.oncomplete=()=>resolve(result);tx.onerror=()=>reject(tx.error||request.error);tx.onabort=()=>reject(tx.error||Error('Storage write was interrupted.'));
+    let result,request;
+    tx.oncomplete=()=>resolve(result);
+    tx.onerror=()=>reject(tx.error||request?.error);
+    tx.onabort=()=>reject(tx.error||Error('Storage write was interrupted.'));
+    try {
+      request=operation(tx.objectStore(store));
+      request.onsuccess=()=>{result=request.result;};
+    }catch(error){tx.abort();reject(error);}
   });
 }
 export const records={get:id=>transact('transfers',s=>s.get(id)),put:record=>transact('transfers',s=>s.put(record),true),list:()=>transact('transfers',s=>s.getAll()),remove:id=>transact('transfers',s=>s.delete(id),true)};
@@ -33,8 +35,8 @@ export async function cleanupApplicationStorage(now=Date.now()){
     localStorage.clear();for(const [key,value] of values)localStorage.setItem(key,value);localStorage.setItem(marker,String(now));
   }catch{}
   try{
-    const database=await db();await new Promise((resolve,reject)=>{
-      const tx=database.transaction(['transfers','blocks','settings'],'readwrite');
+    const tx=await durableConnection.transaction(['transfers','blocks','settings'],'readwrite');
+    await new Promise((resolve,reject)=>{
       tx.objectStore('transfers').clear();tx.objectStore('blocks').clear();tx.objectStore('settings').clear();
       tx.oncomplete=resolve;tx.onerror=()=>reject(tx.error);tx.onabort=()=>reject(tx.error||Error('Cleanup interrupted.'));
     });
