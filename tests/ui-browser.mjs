@@ -8,43 +8,52 @@ await import('../scripts/build.mjs');
 const root=process.cwd();
 const server=createServer(async(req,res)=>{try{let pathname=new URL(req.url,'http://local').pathname;if(!pathname.startsWith('/wifi-file-transfer-web/'))throw Error('Expected repository subpath');pathname=pathname.slice('/wifi-file-transfer-web/'.length)||'index.html';const target=path.resolve(root,pathname);if(!target.startsWith(root+path.sep)||pathname.includes('..'))throw Error('Invalid path');const types={'.html':'text/html','.js':'text/javascript','.css':'text/css','.svg':'image/svg+xml','.webmanifest':'application/manifest+json'};res.setHeader('Content-Type',types[path.extname(target)]||'application/octet-stream');res.end(await readFile(target));}catch{res.statusCode=404;res.end();}});
 await new Promise(r=>server.listen(0,'127.0.0.1',r));const url=`http://127.0.0.1:${server.address().port}/wifi-file-transfer-web/`;
-const browser=await chromium.launch({channel:'chrome',headless:true});let a,b;const errors=[];
-try{
- a=await (await browser.newContext()).newPage();b=await (await browser.newContext()).newPage();
- a.setDefaultTimeout(15000);b.setDefaultTimeout(15000);
- for(const p of [a,b]){await p.addInitScript(()=>{window.showDirectoryPicker=async()=>{const root=await navigator.storage.getDirectory();return root.getDirectoryHandle('test-device-folder',{create:true});};});p.on('pageerror',e=>errors.push(e.message));p.on('dialog',d=>d.accept());await p.goto(url);}
- assert.equal(await a.locator('#send-panel').isVisible(),false);assert.equal(await a.locator('#receive-panel').isVisible(),false);assert.equal(await a.locator('#debug-enabled').isChecked(),true);assert.equal(await a.locator('#discovery-panel').isVisible(),true);
- await b.locator('#receive').click();await b.locator('#current-room').waitFor();const code=(await b.locator('#current-room').innerText()).replaceAll('-','');assert.match(code,/^[a-z0-9]{12}$/);
- await a.goto(url+'#join='+code);await b.locator('#connection-request').waitFor({state:'visible',timeout:60000});assert.equal(await a.locator('#connected-panel').isVisible(),false,'Requester must not be connected before destination approval');await b.locator('#accept-connection').click();await a.locator('#connected-panel').waitFor({state:'visible',timeout:60000});assert.equal(await a.locator('#send-panel').isVisible(),false);assert.equal(await b.locator('#scan-qr').isVisible(),true);
- console.log('PASS: invitation join remains pending until destination connection approval.');
- console.log('Selecting destination');await a.locator('#devices button').first().click();console.log('Destination selected');await a.locator('#send-panel').waitFor({state:'visible'});console.log('Picker visible');await a.evaluate(()=>{document.querySelector('#file-picker').addEventListener('change',()=>window.fileChosenAt=Date.now(),{capture:true});});console.log('Picker listener installed');
- const payload=Buffer.allocUnsafe(1024*1024+17);for(let i=0;i<payload.length;i++)payload[i]=i%251;
- await a.locator('#file-picker').setInputFiles([{name:'any-binary.apk',mimeType:'application/octet-stream',buffer:payload},{name:'empty',mimeType:'application/octet-stream',buffer:Buffer.alloc(0)}]);
- await b.locator('#incoming').waitFor({state:'visible',timeout:30000});console.log('Browser file-selection event to observed receiver offer (ms):',Date.now()-await a.evaluate(()=>window.fileChosenAt));assert.equal(await b.locator('#received-section').isVisible(),false);assert.equal(await b.locator('#accept').isDisabled(),true);await b.locator('#request-folder').click();await b.waitForFunction(()=>!document.querySelector('#accept').disabled);
- await b.locator('#accept').click();await a.waitForFunction(()=>document.querySelector('#history').textContent.includes('Verified complete'),null,{timeout:120000});
- await b.locator('#received-section').waitFor({state:'visible'});assert.equal(await b.getByRole('link',{name:'Save to device'}).count(),0);
- const saved=await b.evaluate(async()=>{const root=await navigator.storage.getDirectory(),folder=await root.getDirectoryHandle('test-device-folder'),file=await (await folder.getFileHandle('any-binary.apk')).getFile();const bytes=new Uint8Array(await file.arrayBuffer());const db=await new Promise((resolve,reject)=>{const r=indexedDB.open('wft-durable-v3');r.onsuccess=()=>resolve(r.result);r.onerror=()=>reject(r.error);});const count=await new Promise(resolve=>{const r=db.transaction('blocks').objectStore('blocks').count();r.onsuccess=()=>resolve(r.result);});const records=await new Promise(resolve=>{const r=db.transaction('transfers').objectStore('transfers').getAll();r.onsuccess=()=>resolve(r.result);});db.close();return {size:file.size,exact:bytes.every((v,i)=>v===i%251),browserBlocks:count,direct:records.every(r=>r.storage==='directory'),empty:(await (await folder.getFileHandle('empty')).getFile()).size};});
- assert.deepEqual(saved,{size:1024*1024+17,exact:true,browserBlocks:0,direct:true,empty:0});
- console.log('PASS: selecting files immediately offers the batch on a pre-opened channel; acceptance requires a device folder; actual filesystem output bytes match and no payload blocks exist in IndexedDB.');
- const ids=await Promise.all([a,b].map(p=>p.evaluate(()=>localStorage.getItem('wft-device-id'))));
- const rememberedHost=ids[0]<ids[1]?a:b;
- await a.getByRole('button',{name:'Remember device',exact:true}).click();
- await rememberedHost.locator('#connection-request').waitFor({state:'visible',timeout:60000});
- await rememberedHost.locator('#accept-connection').click();
- await a.waitForFunction(()=>document.querySelector('#trusted-devices').textContent.includes('Online'),null,{timeout:60000});await b.waitForFunction(()=>document.querySelector('#trusted-devices').textContent.includes('Online'),null,{timeout:60000});console.log('PASS: mutual remembered-device approval completed after transfer.');
- await Promise.all([a.reload(),b.reload()]);
- await rememberedHost.locator('#connection-request').waitFor({state:'visible',timeout:60000});
- assert.equal(await a.locator('#trusted-devices').innerText().then(t=>t.includes('Online')),false,'Remembering does not authorize a new session');
- await rememberedHost.locator('#accept-connection').click();
- await a.locator('#send').click();await b.locator('#receive').click();await a.waitForFunction(()=>document.querySelector('#connected-devices').innerText.includes('Remembered'),null,{timeout:90000});console.log('PASS: remembered devices require fresh destination approval after reload with stable UUID identities.');assert.equal(await b.locator('#recovery-section').isVisible(),false);assert.equal(await b.evaluate(async()=>{const root=await navigator.storage.getDirectory(),folder=await root.getDirectoryHandle('test-device-folder');return (await (await folder.getFileHandle('any-binary.apk')).getFile()).size;}),1024*1024+17);assert.equal(await b.getByRole('link',{name:'Save to device'}).count(),0);
- // Reverse roles: the receiver opens an invitation generated on the sender.
- const c=await (await browser.newContext()).newPage(),d=await (await browser.newContext()).newPage();await d.addInitScript(()=>{window.showDirectoryPicker=undefined;});for(const p of [c,d]){p.on('pageerror',e=>errors.push(e.message));await p.goto(url);}
- await c.locator('#send').click();await c.locator('#current-room').waitFor();const senderCode=(await c.locator('#current-room').innerText()).replaceAll('-','');
- await d.goto(url+'#join='+senderCode+'&mode=receive');await c.locator('#connection-request').waitFor({state:'visible',timeout:60000});await c.locator('#accept-connection').click();await d.locator('#connected-panel').waitFor({state:'visible',timeout:60000});assert.equal(await d.locator('#receive-panel').isVisible(),true);assert.equal(await d.locator('#scan-qr').isVisible(),true);assert.equal(await d.locator('#room-qr').isVisible(),true);assert.equal(await c.locator('#room-qr').isVisible(),true);
- assert.ok((await d.locator('#direct-save-support').innerText()).includes('cannot receive files'));assert.equal(await d.locator('#choose-folder').isVisible(),false);
- console.log('PASS: QR/scanner are present on both roles, sender-generated invitations select Receive mode, and unsupported direct-save browsers get an explicit limitation.');
- await c.close();await d.close();
- await a.setViewportSize({width:360,height:800});assert.equal(await a.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
- assert.deepEqual(errors,[]);console.log('PASS: trusted pairing after reload, binary + empty files, direct folder writes, explicit consent, verification, completed records cleared while destination files remain, mobile layout, subpath worker and assets; no page errors.');
-}catch(e){console.error('UI diagnostics',errors,await Promise.all([a,b].map(p=>p.locator('body').innerText())));throw e;}finally{await browser.close();server.close();}
-
+const browser=await chromium.launch({channel:'chrome',headless:true});const errors=[];
+try {
+ const contextA=await browser.newContext({acceptDownloads:true}),contextB=await browser.newContext({acceptDownloads:true});
+ const a=await contextA.newPage(),b=await contextB.newPage();
+ for(const p of [a,b]){p.on('pageerror',e=>errors.push(e.message));await p.goto(url);await p.locator('#name-dialog').waitFor({state:'visible'});}
+ await a.locator('#welcome-name').fill('日本の端末');await a.locator('#name-form button').click();
+ await b.locator('#welcome-name').fill('هاتف أحمد');await b.locator('#name-form button').click();
+ for(const p of [a,b])assert.equal(await p.locator('#name-dialog').isVisible(),false);
+ await a.reload();assert.equal(await a.locator('#name-dialog').isVisible(),false);
+ assert.equal(await a.locator('#device-name').inputValue(),'日本の端末');
+ await b.locator('#receive').click();await b.waitForFunction(()=>document.querySelector('#current-room').textContent.trim().length>0);
+ const code=(await b.locator('#current-room').innerText()).replaceAll('-','');
+ await a.goto(url+'#join='+code);
+ await b.locator('#connection-request').waitFor({state:'visible',timeout:60000});
+ assert.equal(await a.locator('#connected-panel').isVisible(),false);
+ await b.locator('#accept-connection').click();
+ for(const p of [a,b])await p.locator('#connected-panel').waitFor({state:'visible',timeout:60000});
+ async function send(sender,receiver,name,buffer){
+   await sender.locator('#devices button').first().click();
+   await sender.locator('#send-panel').waitFor({state:'visible',timeout:30000});
+   await sender.locator('#file-picker').setInputFiles({name,mimeType:'application/octet-stream',buffer});
+   await receiver.locator('#incoming').waitFor({state:'visible',timeout:30000});
+   assert.equal(await receiver.locator('#request-folder').isVisible(),false);
+   await receiver.waitForFunction(()=>!document.querySelector('#accept').disabled);
+   const downloadPromise=receiver.waitForEvent('download',{timeout:120000});
+   await receiver.locator('#accept').click();
+   const download=await downloadPromise;
+   assert.equal(download.suggestedFilename(),name);
+   const downloadPath=await download.path();assert.ok(downloadPath);
+   assert.deepEqual(await readFile(downloadPath),buffer);
+   await sender.waitForFunction(()=>document.querySelector('#active-summary').textContent==='',null,{timeout:120000});
+   const fallback=receiver.locator('#downloads a').last();
+   assert.equal(await fallback.innerText(),'Download');assert.equal(await fallback.isVisible(),true);
+   const retryPromise=receiver.waitForEvent('download');await fallback.click();
+   assert.deepEqual(await readFile(await (await retryPromise).path()),buffer);
+ }
+ await send(a,b,'résumé-日本語.bin',Buffer.from([0,1,2,255,128,13,10]));
+ await send(b,a,'ملف.txt',Buffer.from('مرحبا — hello — नमस्ते'));
+ await send(a,b,'empty.txt',Buffer.alloc(0));
+ assert.equal(await b.locator('#recovery-section').isVisible(),true);
+ await b.reload();assert.equal(await b.locator('#name-dialog').isVisible(),false);
+ await b.getByRole('button',{name:'Show received files'}).first().waitFor();
+ const restored=b.waitForEvent('download');await b.getByRole('button',{name:'Show received files'}).first().click();
+ assert.equal(await (await restored).failure(),null);
+ await a.setViewportSize({width:360,height:800});
+ assert.equal(await a.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
+ assert.deepEqual(errors,[]);
+ console.log('PASS: first-visit Unicode names, returning user, mutual consent, two-way transfers, browser downloads, empty/binary files, fallback links, recovery, mobile layout.');
+}finally{await browser.close();server.close();}

@@ -1,14 +1,14 @@
-# Wi-Fi File Transfer — version 3.1
+# Wi-Fi File Transfer — version 4.7.0
 
 [Open the app](https://dng0101.github.io/wifi-file-transfer-web/)
 
 ## Send a file
 
-1. Open the website on both devices.
+1. Open the website on both devices. On the first visit, enter a device name in any language. Returning users keep their saved name; change it in Settings.
 2. Choose **Send Files** on one device and **Receive Files** on the other. Both sides show a QR, scanner, code and link. Either side can scan the other.
-3. Connect, then tap the receiver in **Available devices**. The app opens the file channel before showing the file picker.
-4. Select files or a folder. The transfer request is sent automatically—there is no separate upload or Send step. The receiver chooses a device folder and accepts.
-5. Wait for **Verified complete**. Files are already saved in the chosen device folder; there is no second download step.
+3. Connect, then tap the receiver in **Available devices**. The app confirms that the other device can answer before showing the file picker. Either device can initiate the next transfer.
+4. Select files or a folder. The transfer request is sent automatically—there is no separate upload or Send step. The receiver accepts; no destination-folder picker is required.
+5. Wait for **Verified complete**. Verified files trigger normal browser downloads. If the browser blocks an automatic download, use the visible **Download** link. Your browser controls its Downloads folder, save prompts, and permission for multiple downloads.
 
 After connecting, **Remember device** asks for approval on both devices. On future visits, open the website on both devices and choose Send/Receive: remembered receivers appear without another code. Settings provides rename and forget.
 
@@ -16,7 +16,7 @@ After connecting, **Remember device** asks for approval on both devices. On futu
 
 Files are read in 8 MiB blocks and transported in frames of at most 64 KiB (16 KiB fallback when the negotiated maximum is unknown). The receiver writes blocks to persistent storage before acknowledging them. Neither side intentionally loads a complete large file into JavaScript memory. File size counters use safe JavaScript integers, not 32-bit offsets.
 
-New receives require **Choose device folder** in a browser supporting showDirectoryPicker (desktop Chrome/Edge). File payloads and temporary blocks go into that folder, never OPFS or IndexedDB. Only recovery metadata, hashes and permission handles remain in browser storage. Allow roughly twice the file size free during verification; folder free space cannot be measured reliably. Browsers without this API can send but cannot receive in direct-save mode. Existing v3 browser-stored downloads can still be recovered/deleted, but an old browser-storage transfer must be restarted into a device folder. See [browser API restrictions](https://developer.mozilla.org/en-US/docs/Web/API/Window/showDirectoryPicker) and [test evidence](TEST_REPORT.md).
+New receives temporarily stage verified blocks in OPFS, then produce a verified file for the browser download manager. Browsers without OPFS use an IndexedDB fallback only for batches up to 256 MiB. Temporary staging and final verification can require roughly twice the batch size in browser storage, plus space for the downloaded copy. Browser quotas and download limits apply; successful receipt does not prove the browser finished saving the download. Existing direct-folder transfers remain recoverable using their original permission handles.
 
 Each 8 MiB block has SHA-256 verification. Corrupt transport blocks are retried up to three times. Whole-file SHA-256 is computed incrementally in a worker on the sender and checked again from persisted blocks on the receiver. Completion requires the receiver's final acknowledgement.
 
@@ -24,7 +24,7 @@ Each 8 MiB block has SHA-256 verification. Corrupt transport blocks are retried 
 
 Available devices are checked automatically at startup and refreshed for remembered private pairs; Check again triggers another check. This is not unrestricted LAN scanning and does not prove devices share a Wi-Fi network. Diagnostic events are enabled and shown by default; they can be disabled or collapsed.
 
-Selecting a file reads metadata only, then sends the offer on the already-open channel. File bytes are read in blocks after receiver consent, without pre-uploading or pre-hashing the entire file. Transfer duration still depends on file size, disk speed, network bandwidth, permission prompts and verification. Instant completion is not promised. Idle prepared channels expire after five minutes.
+Selecting a file reads metadata only, then opens a transfer channel to the confirmed device and sends the offer. File bytes are read in blocks after receiver consent, without pre-uploading or pre-hashing the entire file. Transfer duration still depends on file size, disk speed, network bandwidth, permission prompts and verification. Instant completion is not promised.
 
 ## Pause, interruption, and recovery
 
@@ -32,9 +32,9 @@ Pause stops sending new frames; a block already in flight may finish. Resume con
 
 A disconnected transfer preserves verified blocks. Automatic reconnect uses bounded backoff. After those attempts stop, reconnect the receiver and tap Resume. If an invitation expired or the receiver reloaded, create a new invitation and connect the sender to it, then Resume.
 
-After the sender reloads, use **Saved progress → Reselect files & resume** after reconnecting the original receiver. Select the same original files or folder. Names, sizes, modification times, and already acknowledged content are checked. Browser permissions do not allow silently reopening arbitrary source files. On receiver reload, permit the original destination folder when requested. Accepted transfer tokens bind resume requests to saved metadata and application device identities.
+After the sender reloads, use **Saved progress → Reselect files & resume** after reconnecting the original receiver. Select the same original files or folder. Names, sizes, modification times, and already acknowledged content are checked. Browser permissions do not allow silently reopening arbitrary source files. On receiver reload, **Show received files** restores verified download links. Legacy direct-folder transfers may still request their original folder permission. Accepted transfer tokens bind resume requests to saved metadata and application device identities.
 
-Browser storage can be cleared or evicted. Keep original files until delivery is verified. Remove saved data deliberately to free space; already saved destination-folder copies remain. Cancel removes temporary data. History contains metadata, not a substitute for saved files.
+Browser storage can be cleared or evicted. Keep original files until delivery is verified. Completed downloads remain recoverable until you use **Remove saved data**. The app no longer runs destructive periodic startup cleanup. Remove saved data deliberately to free space; copies already downloaded to your device remain. Cancel removes temporary data. History contains metadata, not a substitute for saved files.
 
 ## Connection and privacy
 
@@ -72,7 +72,7 @@ Browser tests require installed Google Chrome and internet access. The large tes
 
 Publish main, root directory. Commit source, lockfile, `assets/app.js`, and `assets/hash-worker.js` together after building. Relative URLs support repository subpaths. The service worker caches an offline app shell; it does not provide offline signaling. See [deployment](DEPLOYMENT.md).
 
-The original static application remains at `legacy.html` for reference. Version 2's transfer module and regression tests remain during migration; the current interface uses the version 3 block protocol. Reload both devices after upgrading. One active transfer per tab is intentional to prevent conflicting destination writes; a batch can contain up to 200 files.
+The original static application remains at `legacy.html` for reference. Version 2's transfer module and regression tests remain during migration; the current interface uses the version 3 block protocol. Reload both devices after upgrading; version 4.7.0 uses a confirmed connection handshake for online pairing. One active transfer per tab is intentional to prevent conflicting destination writes; a batch can contain up to 200 files.
 
 ### QR connection help (3.2)
 
@@ -86,4 +86,8 @@ Turn **Online** on to advertise a small presence record while this page is runni
 
 Presence records live in IndexedDB and synchronize through browser peers every 20 seconds. They contain a persistent installation UUID, display name, current peer IDs, revision, heartbeat sequence, and timestamps. They do not contain files. Records older than five minutes are deleted and rejected if another peer later sends the stale copy.
 
-The online list is not a transfer authorization mechanism. Use the existing QR or code to connect before choosing files. Online discovery works only while participating pages are running; GitHub Pages does not keep browser peers alive after a browser or device closes. It still relies on PeerJS signaling and WebRTC reachability. A configured TURN service may be needed on restrictive networks.
+Online discovery excludes this device's own identity. Tap **Connect** and wait for approval and confirmation on both sides, or use a QR/code invitation. A separate persistent connection carries that confirmation. Either side can then send and receive; each file batch still requires approval. Turning discovery off does not disconnect accepted devices. Closing the connection removes authorization. Online discovery works only while participating pages are running; GitHub Pages does not keep browser peers alive after a browser or device closes. It still relies on PeerJS signaling and WebRTC reachability. A configured TURN service may be needed on restrictive networks.
+
+## International names and display
+
+Names accept Unicode, normalize to NFC, and use automatic text direction for right-to-left scripts. Number formatting follows the browser locale. The interface text is currently English; this release does not add a full translation catalog. Browsers remember names per site/profile; clearing site storage causes the first-visit prompt to return.

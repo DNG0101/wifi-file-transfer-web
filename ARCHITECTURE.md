@@ -1,3 +1,13 @@
+# Version 4.7.0 behavior update
+
+- New receives use OPFS staging (or a bounded IndexedDB fallback) and normal browser downloads. Folder picking is retained only for legacy recovery.
+- Download links stay usable for the page lifetime; completed receive records and verified files persist until explicit removal. No scheduled startup cleanup removes pending downloads.
+- Online connection response → confirmation → ready completes authorization on both peers. The control connection stays open, and closure revokes both sides' authorization. Incoming file channels must match both approved UUID and peer ID.
+- Discovery excludes the current UUID and does not own established transfer connections. Either device can send the next batch after a route probe.
+- A first-visit modal saves a Unicode device name before startup or invitation consumption; returning users skip it. Names use automatic text direction; numeric formatting follows browser locale.
+
+The architecture notes below describe earlier releases; direct-folder-only receive requirements are superseded by the behavior above.
+
 # End-to-end architecture and lifecycle
 
 ## 1. System architecture and workflow

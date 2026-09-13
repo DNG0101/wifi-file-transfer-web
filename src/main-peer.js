@@ -14,8 +14,8 @@ function dispatchIncoming(conn){
 
 export class MainPeerManager{
  constructor(config={}){
-  const {uuid,name,PeerClass=Peer,options=peerOptions(),onIncoming,onConnectionRequest,onState=()=>{},locks=navigator.locks}=config;
-  Object.assign(this,{uuid,name,PeerClass,options,onIncoming:onIncoming||(()=>{}),onConnectionRequest:onConnectionRequest||(()=>false),onState,locks});this.authorized=new Map();
+  const {uuid,name,PeerClass=Peer,options=peerOptions(),onIncoming,onConnectionRequest,onConnected=()=>{},onDisconnected=()=>{},onState=()=>{},locks=navigator.locks}=config;
+  Object.assign(this,{uuid,name,PeerClass,options,onIncoming:onIncoming||(()=>{}),onConnectionRequest:onConnectionRequest||(()=>false),onConnected,onDisconnected,onState,locks});this.authorized=new Map();this.connections=new Map();
   this.acceptIncoming=typeof onIncoming==='function';
   this.id=`wftp-main-${uuid}`;this.enabled=false;this.leader=false;
  }
@@ -51,11 +51,41 @@ export class MainPeerManager{
   }).finally(()=>{shared.opening=null;});
   return shared.opening;
  }
+ holdConnection(conn,member){
+  const previous=this.connections.get(member.deviceId);
+  this.connections.set(member.deviceId,conn);this.authorized.set(member.deviceId,member);
+  if(previous&&previous!==conn)previous.close();
+  const disconnected=()=>{
+    if(this.connections.get(member.deviceId)!==conn)return;
+    this.connections.delete(member.deviceId);this.authorized.delete(member.deviceId);
+    this.onDisconnected(member);
+  };
+  conn.on('close',disconnected);conn.on('error',()=>{conn.close();disconnected();});
+  this.onConnected(member);
+ }
  accept(conn){
   const meta=conn.metadata||{};
   const member={id:conn.peer,deviceId:safe(meta.deviceId)||conn.peer,name:safe(meta.name)||'Online user',mode:'receive',onlineDirectory:true};
-  if(meta.kind==='connection-request'){conn.on('open',async()=>{let accepted=false;try{accepted=await this.onConnectionRequest(member);}catch{}if(accepted)this.authorized.set(member.deviceId,member);conn.send({type:'connection-response',accepted});setTimeout(()=>conn.close(),200);});return;}
-  if(!this.authorized.has(member.deviceId)){conn.on('open',()=>conn.close());return;}
+  if(meta.kind==='connection-request'){
+    let accepted=false,finished=false;
+    const timer=setTimeout(()=>{if(!finished)conn.close();},90000);
+    conn.on('close',()=>{finished=true;clearTimeout(timer);});
+    conn.on('error',()=>{clearTimeout(timer);conn.close();});
+    conn.on('data',message=>{
+      if(finished||!accepted||message?.type!=='connection-confirm')return;
+      finished=true;clearTimeout(timer);
+      this.holdConnection(conn,member);
+      conn.send({type:'connection-ready'});
+    });
+    conn.on('open',async()=>{
+      try{accepted=await this.onConnectionRequest(member);}catch{}
+      if(finished||!conn.open)return;
+      conn.send({type:'connection-response',accepted});
+      if(!accepted){finished=true;clearTimeout(timer);setTimeout(()=>conn.close(),200);}
+    });return;
+  }
+  const authorized=this.authorized.get(member.deviceId);
+  if(!authorized||authorized.id!==conn.peer){conn.on('open',()=>conn.close());return;}
   if(meta.kind==='connection-probe'){conn.on('open',()=>conn.send('ready'));return;}
   if(meta.kind!=='file-v3'){conn.on('open',()=>conn.close());return;}
   this.onIncoming(conn,member);
@@ -64,12 +94,30 @@ export class MainPeerManager{
   const peer=shared.peer||this.peer;
   if(!peer||peer.disconnected)throw Error('Main peer is not ready in this tab.');
   const id=safe(remoteId);if(!id||id===peer.id)throw Error('Invalid destination peer.');
+  if(![...this.authorized.values()].some(member=>member.id===id))throw Error('Connect to this device and wait for approval first.');
   return peer.connect(id,{reliable:true,serialization:'raw',metadata:{kind:'file-v3',transferId,deviceId:this.uuid,name:this.name.slice(0,48)}});
  }
  requestConnection(remoteId,member,timeout=90000){
-  const peer=shared.peer||this.peer,id=safe(remoteId);if(!peer||peer.disconnected||!id||id===peer.id)return Promise.reject(Error('Main peer is not ready for this device.'));
+  const peer=shared.peer||this.peer,id=safe(remoteId);
+  if(!peer||peer.disconnected||!id||id===peer.id)return Promise.reject(Error('Main peer is not ready for this device.'));
+  if(!member?.deviceId||member.id!==id)return Promise.reject(Error('Destination identity does not match.'));
+  const existing=this.connections.get(member.deviceId);
+  if(existing?.open&&this.authorized.get(member.deviceId)?.id===id)return Promise.resolve(member);
   const conn=peer.connect(id,{reliable:true,serialization:'json',metadata:{kind:'connection-request',deviceId:this.uuid,name:this.name.slice(0,48)}});
-  return new Promise((resolve,reject)=>{let done=false;const finish=(error,accepted=false)=>{if(done)return;done=true;clearTimeout(timer);conn.close();if(error)reject(error);else if(!accepted)reject(Error('The destination device declined the connection request.'));else{this.authorized.set(member.deviceId,member);resolve(member);}};const timer=setTimeout(()=>finish(Error('The destination device did not answer the connection request.')),timeout);conn.on('data',m=>m?.type==='connection-response'&&finish(null,m.accepted===true));conn.on('error',()=>finish(Error('Could not send the connection request.')));conn.on('close',()=>finish(Error('The connection request closed early.')));});
+  return new Promise((resolve,reject)=>{
+    let done=false,confirmed=false;
+    const finish=error=>{if(done)return;done=true;clearTimeout(timer);if(error){conn.close();reject(error);}else{this.holdConnection(conn,member);resolve(member);}};
+    const timer=setTimeout(()=>finish(Error('The destination device did not confirm the connection.')),timeout);
+    conn.on('data',message=>{
+      if(done)return;
+      if(message?.type==='connection-response'){
+        if(message.accepted!==true){finish(Error('The destination device declined the connection request.'));return;}
+        confirmed=true;conn.send({type:'connection-confirm'});
+      }else if(message?.type==='connection-ready'&&confirmed)finish();
+    });
+    conn.on('error',()=>finish(Error('Could not confirm the connection.')));
+    conn.on('close',()=>finish(Error('The connection request closed early.')));
+  });
  }
  probe(remoteId,timeout=20000){
   const peer=shared.peer||this.peer,id=safe(remoteId);if(!peer||peer.disconnected||!id||id===peer.id)return Promise.reject(Error('Main peer is not ready for this device.'));
@@ -78,7 +126,7 @@ export class MainPeerManager{
  }
  setName(name){this.name=name;}
  async stop(){
-  if(!this.enabled)return;this.enabled=false;shared.subscribers.delete(this);this.peer=null;this.leader=false;
+  if(!this.enabled)return;for(const conn of this.connections.values())conn.close();this.connections.clear();this.authorized.clear();this.enabled=false;shared.subscribers.delete(this);this.peer=null;this.leader=false;
   // Peer 1 belongs to the application session, not to the Online toggle. It is
   // destroyed only when no manager still owns it (normally when the page ends).
   if(!shared.subscribers.size){shared.peer?.destroy();shared.peer=null;shared.id='';this.releaseLock?.();this.releaseLock=null;}

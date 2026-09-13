@@ -11,7 +11,7 @@ await new Promise(r=>server.listen(0,'127.0.0.1',r));const url=`http://127.0.0.1
 
 const browser=await chromium.launch({channel:'chrome',headless:true});
 const errors=[];
-async function page(){const p=await browser.newPage();p.on('pageerror',e=>errors.push(e.message));await p.goto(url);return p;}
+async function page(){const p=await browser.newPage();p.on('pageerror',e=>errors.push(e.message));await p.goto(url);await p.locator('#welcome-name').fill('QR test device');await p.locator('#name-form button').click();return p;}
 async function scan(target,source){
  const data=await source.locator('#room-qr').getAttribute('src');
  await target.evaluate(data=>{
@@ -35,7 +35,7 @@ try {
   await host.locator('#'+hostMode).click();await host.locator('#current-room').waitFor();
   // The scanning device already has its own invitation in the same mode.
   await guest.locator('#'+hostMode).click();await guest.locator('#current-room').waitFor();
-  await scan(guest,host);await guest.locator('#connected-panel').waitFor({state:'visible',timeout:60000});
+  await scan(guest,host);await host.locator('#connection-request').waitFor({state:'visible',timeout:60000});await host.locator('#accept-connection').click();await guest.locator('#connected-panel').waitFor({state:'visible',timeout:60000});
   await host.locator('#connected-panel').waitFor({state:'visible',timeout:60000});
   assert.equal(await guest.locator('#'+(hostMode==='send'?'receive':'send')).getAttribute('aria-pressed'),'true');
   const code=await host.locator('#current-room').innerText();
@@ -53,9 +53,10 @@ try {
  const racing=await browser.newPage();racing.on('pageerror',e=>errors.push(e.message));
  let release;const held=new Promise(r=>release=r);
  await racing.route('**/connection-config.json',async route=>{await held;await route.fulfill({json:{}});});
- await racing.goto(url);await racing.locator('#send').click();
+ await racing.addInitScript(()=>localStorage.setItem('wft-device-name','Racing device'));await racing.goto(url);await racing.locator('#send').click();
  await racing.evaluate(code=>{location.hash='join='+code+'&mode=send';},code);
  await racing.waitForFunction(()=>!location.hash);release();
+ await host.locator('#connection-request').waitFor({state:'visible',timeout:60000});await host.locator('#accept-connection').click();
  await racing.locator('#connected-panel').waitFor({state:'visible',timeout:60000});
  assert.equal((await racing.locator('#current-room').innerText()).replaceAll('-',''),code);
  console.log('PASS invitation arriving during startup supersedes pending local invitation.');

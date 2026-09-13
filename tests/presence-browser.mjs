@@ -10,13 +10,13 @@ const server=createServer(async(req,res)=>{try{let pathname=new URL(req.url,'htt
 await new Promise(r=>server.listen(0,'127.0.0.1',r));const url=`http://127.0.0.1:${server.address().port}/wifi-file-transfer-web/`;
 
 const browser=await chromium.launch({channel:'chrome',headless:true});const errors=[];
-async function openPage(context,name){const p=await context.newPage();p.on('pageerror',e=>errors.push(e.message));await p.goto(url);await p.locator('details').filter({hasText:'Settings & your devices'}).locator('summary').click();await p.locator('#device-name').fill(name);await p.locator('#device-name').blur();return p;}
+async function openPage(context,name){const p=await context.newPage();p.on('pageerror',e=>errors.push(e.message));await p.goto(url);if(await p.locator('#name-dialog').isVisible()){await p.locator('#welcome-name').fill(name);await p.locator('#name-form button').click();}await p.locator('details').filter({hasText:'Settings & your devices'}).locator('summary').click();await p.locator('#device-name').fill(name);await p.locator('#device-name').blur();return p;}
 try{
  const contexts=await Promise.all([browser.newContext(),browser.newContext(),browser.newContext()]);
  const pages=[];for(let i=0;i<3;i++)pages.push(await openPage(contexts[i],'Online '+(i+1)));
  for(const p of pages)await p.locator('#online-toggle').check();
- for(const p of pages)await p.waitForFunction(()=>document.querySelectorAll('#online-users .online-user').length>=3,null,{timeout:90000});
- for(const p of pages){const names=await p.locator('#online-users').innerText();for(let i=1;i<=3;i++)assert.ok(names.includes('Online '+i));}
+ for(const p of pages)await p.waitForFunction(()=>document.querySelectorAll('#online-users .online-user').length>=2,null,{timeout:90000});
+ for(const p of pages){const names=await p.locator('#online-users').innerText();for(let i=1;i<=3;i++)assert.equal(names.includes('Online '+i),i!==pages.indexOf(p)+1);assert.ok(!names.includes('This device'));}
  const records=await pages[0].evaluate(async()=>{const db=await new Promise((resolve,reject)=>{const r=indexedDB.open('wft-presence-v1');r.onsuccess=()=>resolve(r.result);r.onerror=()=>reject(r.error);});return new Promise((resolve,reject)=>{const r=db.transaction('presenceRecords').objectStore('presenceRecords').getAll();r.onsuccess=()=>resolve(r.result);r.onerror=()=>reject(r.error);});});
  assert.equal(new Set(records.map(r=>r.uuid)).size,records.length);assert.ok(records.every(r=>r.status==='online'&&r.version===r.revision));
  const persistent=await pages[0].evaluate(()=>localStorage.getItem('app_device_uuid'));await pages[0].reload();assert.equal(await pages[0].evaluate(()=>localStorage.getItem('app_device_uuid')),persistent);

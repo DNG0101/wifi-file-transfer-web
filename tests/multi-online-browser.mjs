@@ -24,7 +24,7 @@ try{
  ctxA=await browser.newContext();ctxB=await browser.newContext();ctxC=await browser.newContext();
  a=await ctxA.newPage();b=await ctxB.newPage();c=await ctxC.newPage();
  for(const p of [a,b,c]){p.on('pageerror',e=>errors.push(e.message));p.on('console',m=>{if(m.type()==='error')errors.push('console: '+m.text());});await p.goto(url,{waitUntil:'domcontentloaded'});}
- const setName=(p,name)=>p.evaluate(name=>{const e=document.querySelector('#device-name');e.value=name;e.dispatchEvent(new Event('change',{bubbles:true}));},name);
+ const setName=async(p,name)=>{await p.locator('#welcome-name').fill(name);await p.locator('#name-form button').click();};
  await setName(a,'Sender A');await setName(b,'Receiver B');await setName(c,'Receiver C');
  await Promise.all([a,b,c].map(p=>p.locator('#online-toggle').check()));
  await a.waitForFunction(()=>{const t=document.querySelector('#online-users')?.innerText||'';return t.includes('Receiver B')&&t.includes('Receiver C');},null,{timeout:60000});
@@ -39,7 +39,7 @@ try{
  const probeFile={name:'consent-check.txt',mimeType:'text/plain',buffer:Buffer.from('File selection must reach the destination.')};
  await a.locator('#file-picker').setInputFiles(probeFile);
  await b.locator('#incoming').waitFor({state:'visible',timeout:30000});
- assert.equal(await b.locator('#accept').isDisabled(),true);
+ await b.waitForFunction(()=>!document.querySelector('#accept').disabled);assert.equal(await b.locator('#request-folder').isVisible(),false);
  await b.locator('#decline').click();await a.waitForFunction(()=>document.querySelector('#history').textContent.includes('Declined'));
  await b.locator('#devices .device').filter({hasText:'Sender A'}).click();
  await b.locator('#file-picker').setInputFiles(probeFile);
@@ -47,6 +47,7 @@ try{
  await b.waitForFunction(()=>document.querySelector('#history').textContent.includes('Declined'));
  console.log('PASS: real file picker offers on Main Peer in both directions; decline finishes without destination storage or file bytes.');
  await b.locator('#online-toggle').uncheck();await a.waitForFunction(()=>!(document.querySelector('#online-users')?.innerText||'').includes('Receiver B'),null,{timeout:15000});
+ assert.ok((await a.locator('#connected-devices').innerText()).includes('Receiver B'),'Discovery off must preserve established connection');
  await b.locator('#online-toggle').check();await a.waitForFunction(()=>{const t=document.querySelector('#online-users')?.innerText||'';return t.includes('Receiver B')&&t.includes('Receiver C');},null,{timeout:30000});
  await a.locator('#devices .device').filter({hasText:'Receiver C'}).click();await a.waitForFunction(()=>document.querySelector('#target-name')?.textContent.includes('Receiver C'));
  assert.deepEqual(errors,[]);
