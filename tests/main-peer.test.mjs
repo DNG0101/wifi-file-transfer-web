@@ -46,4 +46,37 @@ export async function checkTwoWayConnections(makeManager) {
   return 'Two-way confirmation, reverse file channels, persistent pairing, probe, spoof rejection, disconnect, and decline checks passed';
 }
 
-test('online pairing confirms both sides and allows sending either way',async()=>{await checkTwoWayConnections(config=>new MainPeerManager({...config,options:{},locks:null}));});
+test('online pairing confirms both sides and allows sending either way',async()=>{await checkTwoWayConnections(config=>new MainPeerManager({...config,options:{},locks:null,continuityStorage:null}));});
+
+test('accepted connection resumes after reload without asking for approval again',async()=>{
+  const assert=(v,m)=>{if(!v)throw Error(m);};
+  const tick=async()=>{for(let i=0;i<20;i++)await Promise.resolve();};
+  class MemoryStorage{constructor(){this.map=new Map();}getItem(k){return this.map.get(k)??null;}setItem(k,v){this.map.set(k,String(v));}}
+  class Channel{
+    constructor(peer,metadata){this.peer=peer;this.metadata=metadata;this.open=false;this.events=new Map();}
+    on(type,fn){const list=this.events.get(type)||[];list.push(fn);this.events.set(type,list);}
+    emit(type,data){for(const fn of this.events.get(type)||[])fn(data);}
+    send(data){if(!this.open)throw Error('Closed channel');Promise.resolve().then(()=>{if(this.other.open)this.other.emit('data',data);});}
+    close(){if(!this.open)return;this.open=false;this.emit('close');if(this.other.open){this.other.open=false;this.other.emit('close');}}
+  }
+  const wire=(from,to)=>({id:from.id,disconnected:false,connect(id,options){
+    assert(id===to.id,'Wrong peer destination during continuity test');
+    const left=new Channel(to.id,options.metadata),right=new Channel(from.id,options.metadata);left.other=right;right.other=left;to.accept(right);
+    Promise.resolve().then(()=>{left.open=right.open=true;right.emit('open');left.emit('open');});return left;
+  }});
+  const aStore=new MemoryStorage(),bStore=new MemoryStorage();let firstApprovals=0,reloadApprovals=0;
+  const a=new MainPeerManager({uuid:'a',name:'A',options:{},locks:null,continuityStorage:aStore,onConnectionRequest:()=>true,onIncoming:()=>{}});
+  const b=new MainPeerManager({uuid:'b',name:'B',options:{},locks:null,continuityStorage:bStore,onConnectionRequest:()=>{firstApprovals++;return true;},onIncoming:()=>{}});
+  a.peer=wire(a,b);b.peer=wire(b,a);
+  await a.requestConnection(b.id,{id:b.id,deviceId:'b',name:'B',onlineDirectory:true},1000);await tick();
+  const saved=a.continuityFor('b');assert(saved&&saved.token&&b.continuityFor('a')?.token===saved.token,'Both devices must persist the same reload continuity token');
+  a.connections.get('b').close();await tick();
+  const bReload=new MainPeerManager({uuid:'b',name:'B',options:{},locks:null,continuityStorage:bStore,onConnectionRequest:()=>{reloadApprovals++;return false;},onIncoming:()=>{}});
+  a.peer=wire(a,bReload);bReload.peer=wire(bReload,a);
+  await a.requestResume(saved,bReload.id,1000);await tick();
+  assert(firstApprovals===1&&reloadApprovals===0,'Reload continuity must not show the connection approval dialog again');
+  assert(a.connections.get('b')?.open&&bReload.connections.get('a')?.open,'Reload must restore the live control connection');
+  assert(a.authorized.get('b')?.id===bReload.id&&bReload.authorized.get('a')?.id===a.id,'Reload must restore both authorizations');
+  assert(a.disconnect('b'),'Explicit disconnect must still work after automatic resume');await tick();
+  assert(!a.continuityFor('b')&&!bReload.continuityFor('a'),'Explicit disconnect must revoke reload continuity on both devices');
+});
