@@ -1,0 +1,58 @@
+name: Rebuild browser assets
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'src/**'
+      - 'scripts/build.mjs'
+      - 'package.json'
+      - 'package-lock.json'
+      - '.github/workflows/rebuild-assets.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: rebuild-browser-assets
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: '1'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run unit tests
+        run: npm test
+
+      - name: Build browser assets
+        run: npm run build
+
+      - name: Commit generated assets
+        shell: bash
+        run: |
+          if git diff --quiet -- assets/app.js assets/hash-worker.js; then
+            echo "Generated browser assets are already current."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add assets/app.js assets/hash-worker.js
+          git commit -m "Build browser assets"
+          git push origin HEAD:main
