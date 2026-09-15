@@ -358,7 +358,7 @@ function scheduleReconnect(t,member){
  },[1000,3000,8000,15000][t.reconnectAttempts]);
 }
 function incoming(conn,member){
- if(!['file-v3','file-v4'].includes(conn.metadata?.kind)){conn.close();return;}
+ if(!['file-v3','file-v5'].includes(conn.metadata?.kind)){conn.close();return;}
  if(cancelledTransfers.has(conn.metadata.transferId)){conn.close();return;}
  const lane=Number.isInteger(conn.metadata?.lane)?conn.metadata.lane:0;
  const existing=transfers.get(conn.metadata.transferId);

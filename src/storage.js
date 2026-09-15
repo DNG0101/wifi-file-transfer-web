@@ -56,7 +56,8 @@ export function cleanPath(value) {
 export async function storageAvailability(bytes=0) {
   const estimate=await navigator.storage?.estimate?.().catch(()=>({}))||{};
   const available=typeof estimate.quota==='number'?Math.max(0,estimate.quota-(estimate.usage||0)):null;
-  return {opfs:!!navigator.storage?.getDirectory,indexedDB:typeof indexedDB!=='undefined',directory:typeof window.showDirectoryPicker==='function',available,enough:available===null||available>bytes*2+16*1024*1024};
+  const reserve=Math.max(64*1024*1024,Math.ceil(bytes*0.1));
+  return {opfs:!!navigator.storage?.getDirectory,indexedDB:typeof indexedDB!=='undefined',directory:typeof window.showDirectoryPicker==='function',available,enough:available===null||available>bytes+reserve};
 }
 export function friendlyStorageError(e) {
   if(e?.name==='QuotaExceededError')return 'Storage is full. Free space, then retry.';
@@ -84,14 +85,21 @@ export class BlockStorage {
   }
   key(file,block){return `${this.record.transferId}:${file}:${block}`;}
   async write(file,block,bytes) {
-    if(this.staging){const h=await this.staging.getFileHandle(`f${file}-b${block}.part`,{create:true});const w=await h.createWritable();try{await w.write(bytes);await w.close();}catch(e){await w.abort().catch(()=>{});throw e;}}
+    if(this.staging&&this.record.layout==='packed-v1'){
+      const h=await this.staging.getFileHandle(`f${file}.part`,{create:true}),w=await h.createWritable({keepExistingData:true});
+      try{await w.write({type:'write',position:block*BLOCK_SIZE,data:bytes});await w.close();}catch(e){await w.abort().catch(()=>{});throw e;}
+    }else if(this.staging){const h=await this.staging.getFileHandle(`f${file}-b${block}.part`,{create:true});const w=await h.createWritable();try{await w.write(bytes);await w.close();}catch(e){await w.abort().catch(()=>{});throw e;}}
     else await transact('blocks',s=>s.put({id:this.key(file,block),data:new Blob([bytes])}),true);
   }
   async read(file,block) {
+    if(this.staging&&this.record.layout==='packed-v1'){
+      const blob=await (await this.staging.getFileHandle(`f${file}.part`)).getFile(),start=block*BLOCK_SIZE,end=Math.min(blob.size,start+BLOCK_SIZE);if(end<=start)throw Error('A temporary transfer block is missing. Retry the transfer.');return blob.slice(start,end).arrayBuffer();
+    }
     if(this.staging)return (await (await this.staging.getFileHandle(`f${file}-b${block}.part`)).getFile()).arrayBuffer();
     const item=await transact('blocks',s=>s.get(this.key(file,block)));if(!item)throw Error('A temporary transfer block is missing. Retry the transfer.');return item.data.arrayBuffer();
   }
   async removeBlock(file,block) {
+    if(this.staging&&this.record.layout==='packed-v1')return;
     if(this.staging)await this.staging.removeEntry(`f${file}-b${block}.part`).catch(()=>{});
     else await transact('blocks',s=>s.delete(this.key(file,block)),true);
   }
@@ -99,6 +107,22 @@ export class BlockStorage {
     for(let b=0;b<state.next;b++) {
       try{const bytes=await this.read(file,b);if(await blockHash(bytes)!==state.hashes[b])return b;}catch{return b;}
     }return state.next;
+  }
+  async finalizeVerified(file,state,digest,onProgress=()=>{},isCancelled=()=>false) {
+    const meta=this.record.manifest[file];let output,writer;const fallback=[];
+    try {
+      if(this.record.storage==='directory') {
+        let dir=this.root;const parts=cleanPath(meta.path||meta.name).split('/');for(const part of parts.slice(0,-1))dir=await dir.getDirectoryHandle(part,{create:true});
+        output=await uniqueFile(dir,parts.at(-1));writer=await output.handle.createWritable();
+      }else if(this.staging&&this.record.layout==='packed-v1'){
+        output={name:meta.name,handle:await this.staging.getFileHandle(`f${file}.part`)};const blob=await output.handle.getFile();if(blob.size!==meta.size)throw Error('The received file size does not match. Retry the transfer.');onProgress(meta.size);
+      }else if(this.staging){output={name:meta.name,handle:await this.staging.getFileHandle(`verified-${file}`,{create:true})};writer=await output.handle.createWritable();}
+      else if(meta.size>256*1024*1024)throw Error('This browser needs a download folder or OPFS for large files.');
+      if(writer||!output){for(let b=0;b<state.next;b++){if(isCancelled())throw Error('Verification cancelled.');const bytes=await this.read(file,b);if(writer)await writer.write(bytes);else fallback.push(bytes);onProgress(Math.min(meta.size,(b+1)*BLOCK_SIZE));}}
+      if(isCancelled())throw Error('Verification cancelled.');if(writer)await writer.close();if(isCancelled())throw Error('Verification cancelled before completion was acknowledged.');
+      state.digest=digest;state.complete=true;state.outputName=output?.name;state.outputHandle=output?.handle;await records.put(this.record);
+      return this.record.storage==='directory'?{savedName:output.name}:{blob:output?await output.handle.getFile():new Blob(fallback,{type:'application/octet-stream'})};
+    }catch(e){await writer?.abort().catch(()=>{});throw e;}
   }
   async finalize(file,state,digest,onProgress=()=>{},isCancelled=()=>false) {
     const meta=this.record.manifest[file];let output,writer;const fallback=[];

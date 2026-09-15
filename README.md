@@ -1,4 +1,4 @@
-# Wi-Fi File Transfer — version 4.12.0
+# Wi-Fi File Transfer — version 4.13.0
 
 [Open the app](https://dng0101.github.io/wifi-file-transfer-web/)
 

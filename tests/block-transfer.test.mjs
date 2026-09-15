@@ -53,8 +53,9 @@ test('corrupt block is retransmitted without restarting the whole transfer',asyn
 test('network interruption resumes at the next verified block',async()=>{
   let broken=false;const starts=[];const[a,b]=pair((raw,conn)=>{if(typeof raw==='string'&&JSON.parse(raw).type==='block-start')starts.push(JSON.parse(raw).block);if(raw instanceof ArrayBuffer&&new DataView(raw).getUint32(24)===1&&!broken){broken=true;conn.close();return;}return raw;});
   const store=new Store(),Storage=storageClass();const receiver=new BlockTransfer(b,{store,Storage,onOffer:(_,t)=>t.accept({storage:'test'})});const sender=new BlockTransfer(a,{store,files:[makeFile(BLOCK_SIZE*2+11)]});
-  await until(()=>sender.state==='reconnecting'&&receiver.state==='reconnecting');assert.equal(receiver.record.files[0].next,1);
-  const[c,d]=pair(raw=>{if(typeof raw==='string'&&JSON.parse(raw).type==='block-start')starts.push(JSON.parse(raw).block);return raw;});receiver.attach(d);sender.attach(c);await until(()=>sender.terminal());assert.equal(sender.state,'complete',sender.detail);assert.equal(starts.filter(x=>x===0).length,1);assert.equal(receiver.state,'complete');
+  await until(()=>sender.state==='reconnecting'&&receiver.state==='reconnecting');const verified=receiver.record.files[0].next;assert.ok(verified>=0&&verified<=1);
+  const before=new Map();for(let b=0;b<verified;b++)before.set(b,starts.filter(x=>x===b).length);
+  const[c,d]=pair(raw=>{if(typeof raw==='string'&&JSON.parse(raw).type==='block-start')starts.push(JSON.parse(raw).block);return raw;});receiver.attach(d);sender.attach(c);await until(()=>sender.terminal());assert.equal(sender.state,'complete',sender.detail);for(const [b,count] of before)assert.equal(starts.filter(x=>x===b).length,count,`verified block ${b} must not be resent`);assert.equal(receiver.state,'complete');
 });
 test('receiver never accepts bytes before explicit consent',async()=>{
   const[a,b]=pair(),store=new Store(),Storage=storageClass();let offered=false;const receiver=new BlockTransfer(b,{store,Storage,onOffer:()=>{offered=true;}});const sender=new BlockTransfer(a,{store,files:[makeFile(1024)]});await until(()=>offered);assert.equal(receiver.record,undefined);assert.equal(sender.state,'waiting');receiver.decline();await until(()=>sender.terminal());assert.equal(sender.state,'declined');
@@ -74,7 +75,7 @@ test('source re-selection after refresh rejects changed bytes even with matching
 });
 test('backpressure waits for native bufferedamountlow before sending file bytes',async()=>{
  const[a,b]=pair(),store=new Store(),Storage=storageClass();const channel=new EventTarget();channel.bufferedAmount=40*1024*1024;a.dataChannel=channel;
- const receiver=new BlockTransfer(b,{store,Storage,onOffer:(_,t)=>t.accept({storage:'test'})});const sender=new BlockTransfer(a,{store,files:[makeFile(10000)]});await until(()=>sender.state==='transferring');await sleep(100);assert.equal(receiver.record.files[0].next,0);assert.equal(receiver.block,null);channel.bufferedAmount=0;channel.dispatchEvent(new Event('bufferedamountlow'));await until(()=>sender.terminal());assert.equal(sender.state,'complete',sender.detail);
+ const receiver=new BlockTransfer(b,{store,Storage,onOffer:(_,t)=>t.accept({storage:'test'})});const sender=new BlockTransfer(a,{store,files:[makeFile(10000)]});await until(()=>sender.state==='transferring');await sleep(100);assert.equal(receiver.record.files[0].next,0);assert.equal(receiver.blocks.size,0);channel.bufferedAmount=0;channel.dispatchEvent(new Event('bufferedamountlow'));await until(()=>sender.terminal());assert.equal(sender.state,'complete',sender.detail);
 });
 test('direct-save policy rejects browser storage before any payload is accepted',async()=>{
  const[a,b]=pair(),store=new Store(),Storage=storageClass();const receiver=new BlockTransfer(b,{store,Storage,requireDirectory:true,onOffer:(_,t)=>t.accept({storage:'opfs'})});const sender=new BlockTransfer(a,{store,files:[makeFile(1024)]});await until(()=>sender.terminal());assert.equal(sender.state,'failed');assert.match(sender.detail,/Choose a device folder/);assert.equal(receiver.record,undefined);
@@ -96,9 +97,15 @@ test('parallel transfer lanes stripe a large file across independent connections
 
 test('receiver assembles non-overlapping frames that arrive out of order',()=>{
   const[a,b]=pair(),store=new Store(),Storage=storageClass(),receiver=new BlockTransfer(b,{store,Storage});
-  const id=crypto.randomUUID();receiver.id=id;receiver.block={file:0,index:0,hash:'0'.repeat(64),data:new Uint8Array(6),received:0,ranges:[],endSeen:false,finalizing:null};
+  const id=crypto.randomUUID(),block={file:0,index:0,hash:'0'.repeat(64),data:new Uint8Array(6),received:0,buckets:new Map(),endSeen:false,finalizing:null};receiver.id=id;receiver.blocks.set('0:0',block);
   receiver.receiveBinary(encodeChunk(id,0,0,3,new Uint8Array([4,5,6]).buffer));
   receiver.receiveBinary(encodeChunk(id,0,0,0,new Uint8Array([1,2,3]).buffer));
-  assert.deepEqual([...receiver.block.data],[1,2,3,4,5,6]);assert.equal(receiver.block.received,6);
+  assert.deepEqual([...block.data],[1,2,3,4,5,6]);assert.equal(block.received,6);
   clearInterval(receiver.heartbeat);a.close();
+});
+
+test('sliding window keeps multiple durable blocks in flight before earlier ACKs',async()=>{
+  let outstanding=0,maxOutstanding=0;const[a,b]=pair(raw=>{if(typeof raw==='string'){const m=JSON.parse(raw);if(m.type==='block-start'){outstanding++;maxOutstanding=Math.max(maxOutstanding,outstanding);}if(m.type==='block-ack')outstanding=Math.max(0,outstanding-1);}return raw;});
+  const store=new Store(),Storage=storageClass(),receiver=new BlockTransfer(b,{store,Storage,onOffer:(_,t)=>t.accept({storage:'test'})});
+  const sender=new BlockTransfer(a,{store,files:[makeFile(BLOCK_SIZE*4+777)]});await until(()=>sender.terminal());assert.equal(sender.state,'complete',sender.detail);assert.equal(receiver.state,'complete');assert.ok(maxOutstanding>=2,`expected pipelined blocks, saw ${maxOutstanding}`);
 });
