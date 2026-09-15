@@ -24,8 +24,10 @@ jobs:
         run: python3 scripts/patch-v413.py
       - name: Install dependencies
         run: npm ci
+      - name: Run transfer protocol tests
+        run: timeout 60s node --test tests/block-transfer.test.mjs
       - name: Run full test suite
-        run: npm test
+        run: timeout 90s npm test
       - name: Build production bundle
         run: npm run build
       - name: Syntax check generated bundle
