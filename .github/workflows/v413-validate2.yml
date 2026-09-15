@@ -1,0 +1,43 @@
+name: v4.13 Pipeline validation 2
+
+on:
+  push:
+    branches:
+      - perf/sliding-window-v413
+
+permissions:
+  contents: write
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: perf/sliding-window-v413
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Apply patches
+        run: |
+          python3 scripts/patch-v413.py
+          python3 scripts/patch-v413-fix.py
+      - name: Install dependencies
+        run: npm ci
+      - name: Transfer tests
+        run: timeout 60s node --test tests/block-transfer.test.mjs
+      - name: Full tests
+        run: timeout 90s npm test
+      - name: Production build
+        run: npm run build
+      - name: Bundle syntax
+        run: node --check assets/app.js
+      - name: Commit release sources
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add README.md assets/app.js docs/validation-4.13.md index.html package.json package-lock.json src/app.js src/block-transfer.js src/main-peer.js src/room.js src/storage.js sw.js tests/block-transfer.test.mjs
+          git commit -m "Pipeline verified blocks with packed storage; v4.13.0"
+          git push origin HEAD:perf/sliding-window-v413
