@@ -178,7 +178,7 @@ export class Room {
     const member = this.members.get(conn.peer);
     if(conn.metadata?.kind==='connection-probe'&&member){conn.on('open',()=>conn.send('ready'));return;}
     if(conn.metadata?.kind==='contact-v3'&&member){let used=false;conn.on('data',message=>{if(used||JSON.stringify(message).length>4096){conn.close();return;}used=true;this.cb.onMessage?.(message,member,response=>{if(conn.open)conn.send(response);});});this.later(()=>conn.close(),90000);return;}
-    if (['file-v2','file-v3'].includes(conn.metadata?.kind) && member) this.cb.onTransfer?.(conn,member);
+    if (['file-v2','file-v3','file-v4'].includes(conn.metadata?.kind) && member) this.cb.onTransfer?.(conn,member);
     else conn.on('open', () => { conn.send(JSON.stringify({type:'decline',reason:'This transfer channel is not authorized for the connected device.'})); this.later(() => conn.close(),300); });
   }
   disconnect(id) {
@@ -192,7 +192,12 @@ export class Room {
   connect(id,transferId) {
     if (this.closed || this.state !== 'connected' || this.peer.disconnected) throw Error('Room disconnected. Use Retry connection first.');
     if (!this.members.has(id)) throw Error('Device left the room.');
-    return this.peer.connect(id,{reliable:true,serialization:'raw',metadata:{kind:transferId?'file-v3':'file-v2',transferId}});
+    return this.peer.connect(id,{reliable:true,serialization:'raw',metadata:{kind:transferId?'file-v4':'file-v2',transferId,lane:0}});
+  }
+  connectLane(id,transferId,lane){
+    if(this.closed||this.state!=='connected'||this.peer.disconnected||!this.members.has(id))throw Error('Device is no longer connected.');
+    if(!transferId||!Number.isInteger(lane)||lane<=0||lane>=4)throw Error('Invalid parallel transfer lane.');
+    return this.peer.connect(id,{reliable:true,serialization:'raw',metadata:{kind:'file-v4',transferId,lane}});
   }
   probe(id,timeout=20000){
     if(this.closed||this.state!=='connected'||this.peer.disconnected||!this.members.has(id))return Promise.reject(Error('Device is no longer connected.'));

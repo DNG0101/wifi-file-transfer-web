@@ -40,7 +40,7 @@ function showConnectionRequest(){
 $('accept-connection').onclick=()=>pendingConnectionDecision?.(true);
 $('reject-connection').onclick=()=>pendingConnectionDecision?.(false);
 $('connection-request').addEventListener('cancel',event=>{event.preventDefault();pendingConnectionDecision?.(false);});
-const directoryRoom={cancelTransfer:(peer,id)=>mainPeer.cancelTransfer(peer,id),connect:(id,transferId)=>mainPeer.connect(id,transferId),probe:(id,timeout)=>mainPeer.probe(id,timeout)};
+const directoryRoom={cancelTransfer:(peer,id)=>mainPeer.cancelTransfer(peer,id),connect:(id,transferId)=>mainPeer.connect(id,transferId),connectLane:(id,transferId,lane)=>mainPeer.connectLane(id,transferId,lane),probe:(id,timeout)=>mainPeer.probe(id,timeout)};
 function directoryMember(user){return {id:user.peerId,deviceId:user.uuid,name:user.name,mode:'receive',onlineDirectory:true,room:directoryRoom};}
 function renderOnlineUsers(users=[]){
  onlineUsers=users.filter((u,i)=>u.uuid!==deviceId&&users.findIndex(x=>x.uuid===u.uuid)===i);
@@ -289,6 +289,7 @@ function track(conn,member,outgoing,record,batch=files) {
  const row={id:record?.transferId||conn.metadata?.transferId||crypto.randomUUID(),peer:member.name,direction:outgoing?'send':'receive',state:'connecting',files:[],bytes:0,total:0,time:new Date().toISOString()};
  history.unshift(row);history=history.slice(0,Math.max(50,transfers.size+1));drawHistory();$('history').closest('details').open=true;
  const t=new BlockTransfer(conn,{files:outgoing?[...batch]:undefined,record,id:row.id,senderId:outgoing?deviceId:member.deviceId,receiverId:outgoing?member.deviceId:deviceId,reselected:!!record,requireDirectory:false,
+ openLane:outgoing&&member.room.connectLane?lane=>member.room.connectLane(member.id,row.id,lane):undefined,laneCount:3,
  onCancel:id=>notifyCancellation(id,member),onCleanupError:error=>{debug('Cleanup needs retry: '+error.message);void renderRecovery();},
  onUpdate:update=>{
   const terminal=['complete','failed','cancelled','declined'].includes(update.state);
@@ -357,13 +358,17 @@ function scheduleReconnect(t,member){
  },[1000,3000,8000,15000][t.reconnectAttempts]);
 }
 function incoming(conn,member){
- if(conn.metadata?.kind!=='file-v3'){conn.close();return;}
+ if(!['file-v3','file-v4'].includes(conn.metadata?.kind)){conn.close();return;}
  if(cancelledTransfers.has(conn.metadata.transferId)){conn.close();return;}
+ const lane=Number.isInteger(conn.metadata?.lane)?conn.metadata.lane:0;
  const existing=transfers.get(conn.metadata.transferId);
  if(existing){
-  if(existing.transfer.direction==='receive'&&existing.member.deviceId===member.deviceId)existing.transfer.attach(conn);else conn.close();
+  if(existing.transfer.direction==='receive'&&existing.member.deviceId===member.deviceId){if(lane>0)existing.transfer.addLane(conn,lane);else existing.transfer.attach(conn);}else conn.close();
   return;
  }
+ // Turbo lanes are opened only after the primary transfer has been accepted, so
+ // an orphaned secondary lane is never allowed to create a transfer by itself.
+ if(lane>0){conn.close();return;}
  track(conn,member,false);
 }
 async function openRoom(host,codeOverride,collisions=0) {

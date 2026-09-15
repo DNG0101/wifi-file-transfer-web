@@ -93,15 +93,22 @@ export class MainPeerManager{
   const authorized=this.authorized.get(member.deviceId);
   if(!authorized||authorized.id!==conn.peer){conn.on('open',()=>conn.close());return;}
   if(meta.kind==='connection-probe'){conn.on('open',()=>conn.send('ready'));return;}
-  if(meta.kind!=='file-v3'){conn.on('open',()=>conn.close());return;}
-  this.onIncoming(conn,member);
+  if(!['file-v3','file-v4'].includes(meta.kind)){conn.on('open',()=>conn.close());return;}
+  this.onIncoming(conn,{...member,lane:Number.isInteger(meta.lane)?meta.lane:0});
  }
  connect(remoteId,transferId){
   const peer=shared.peer||this.peer;
   if(!peer||peer.disconnected)throw Error('Main peer is not ready in this tab.');
   const id=safe(remoteId);if(!id||id===peer.id)throw Error('Invalid destination peer.');
   if(![...this.authorized.values()].some(member=>member.id===id))throw Error('Connect to this device and wait for approval first.');
-  return peer.connect(id,{reliable:true,serialization:'raw',metadata:{kind:'file-v3',transferId,deviceId:this.uuid,name:this.name.slice(0,48)}});
+  return peer.connect(id,{reliable:true,serialization:'raw',metadata:{kind:'file-v4',transferId,lane:0,deviceId:this.uuid,name:this.name.slice(0,48)}});
+ }
+ connectLane(remoteId,transferId,lane){
+  const peer=shared.peer||this.peer,id=safe(remoteId);
+  if(!peer||peer.disconnected)throw Error('Main peer is not ready in this tab.');
+  if(!id||id===peer.id||!Number.isInteger(lane)||lane<=0||lane>=4)throw Error('Invalid parallel transfer lane.');
+  if(![...this.authorized.values()].some(member=>member.id===id))throw Error('Connect to this device and wait for approval first.');
+  return peer.connect(id,{reliable:true,serialization:'raw',metadata:{kind:'file-v4',transferId,lane,deviceId:this.uuid,name:this.name.slice(0,48)}});
  }
  requestConnection(remoteId,member,timeout=90000){
   const peer=shared.peer||this.peer,id=safe(remoteId);

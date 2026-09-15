@@ -79,3 +79,26 @@ test('backpressure waits for native bufferedamountlow before sending file bytes'
 test('direct-save policy rejects browser storage before any payload is accepted',async()=>{
  const[a,b]=pair(),store=new Store(),Storage=storageClass();const receiver=new BlockTransfer(b,{store,Storage,requireDirectory:true,onOffer:(_,t)=>t.accept({storage:'opfs'})});const sender=new BlockTransfer(a,{store,files:[makeFile(1024)]});await until(()=>sender.terminal());assert.equal(sender.state,'failed');assert.match(sender.detail,/Choose a device folder/);assert.equal(receiver.record,undefined);
 });
+
+
+test('parallel transfer lanes stripe a large file across independent connections',async()=>{
+  let primaryFrames=0,laneFrames=0;
+  const[a,b]=pair(raw=>{if(raw instanceof ArrayBuffer)primaryFrames++;return raw;});
+  const store=new Store(),Storage=storageClass();
+  const receiver=new BlockTransfer(b,{store,Storage,onOffer:(_,t)=>t.accept({storage:'test'})});
+  const sender=new BlockTransfer(a,{store,Storage,files:[makeFile(BLOCK_SIZE*2+12345)],laneCount:3,openLane:index=>{
+    const[out,inc]=pair(raw=>{if(raw instanceof ArrayBuffer)laneFrames++;return raw;});receiver.addLane(inc,index);return out;
+  }});
+  await until(()=>sender.terminal());
+  assert.equal(sender.state,'complete',sender.detail);assert.equal(receiver.state,'complete');
+  assert.ok(primaryFrames>0,'primary lane should carry file frames');assert.ok(laneFrames>0,'extra PeerConnections should carry file frames');
+});
+
+test('receiver assembles non-overlapping frames that arrive out of order',()=>{
+  const[a,b]=pair(),store=new Store(),Storage=storageClass(),receiver=new BlockTransfer(b,{store,Storage});
+  const id=crypto.randomUUID();receiver.id=id;receiver.block={file:0,index:0,hash:'0'.repeat(64),data:new Uint8Array(6),received:0,ranges:[],endSeen:false,finalizing:null};
+  receiver.receiveBinary(encodeChunk(id,0,0,3,new Uint8Array([4,5,6]).buffer));
+  receiver.receiveBinary(encodeChunk(id,0,0,0,new Uint8Array([1,2,3]).buffer));
+  assert.deepEqual([...receiver.block.data],[1,2,3,4,5,6]);assert.equal(receiver.block.received,6);
+  clearInterval(receiver.heartbeat);a.close();
+});
