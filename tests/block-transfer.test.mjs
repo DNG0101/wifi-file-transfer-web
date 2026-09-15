@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {EventEmitter} from 'node:events';
-import {BlockTransfer,decodeChunk,encodeChunk,manifestFor} from '../src/block-transfer.js';
+import {BlockTransfer,decodeChunk,encodeChunk,manifestFor,transportPlan} from '../src/block-transfer.js';
 import {CheckpointHash,blockHash} from '../src/integrity.js';
 import {BLOCK_SIZE} from '../src/storage.js';
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));
@@ -31,6 +31,15 @@ test('checkpoint hashes survive partial blocks and large byte counters',()=>{
 test('10 GB metadata and bound binary frames do not truncate file sizes',()=>{
   assert.equal(manifestFor([{name:'10gb.bin',size:10*1024**3,lastModified:1}])[0].size,10*1024**3);
   const id=crypto.randomUUID(),raw=encodeChunk(id,3,1279,42,new Uint8Array([1,2]).buffer);assert.equal(decodeChunk(raw,id).block,1279);assert.throws(()=>decodeChunk(raw,crypto.randomUUID()));
+});
+test('turbo transport uses negotiated large frames and a deep bounded send window',()=>{
+  const plan=transportPlan({peerConnection:{sctp:{maxMessageSize:262144}}});
+  assert.equal(plan.payload,262144-36);assert.ok(plan.high>=8*1024*1024&&plan.high<=32*1024*1024);assert.ok(plan.low>=2*1024*1024&&plan.low<plan.high);
+});
+test('turbo transport reduces frame count when SCTP permits larger messages',async()=>{
+  let frames=0;const[a,b]=pair(raw=>{if(raw instanceof ArrayBuffer)frames++;return raw;});a.peerConnection.sctp.maxMessageSize=262144;
+  const store=new Store(),Storage=storageClass(),receiver=new BlockTransfer(b,{store,Storage,onOffer:(_,t)=>t.accept({storage:'test'})});
+  const sender=new BlockTransfer(a,{store,files:[makeFile(600000)]});await until(()=>sender.terminal());assert.equal(sender.state,'complete',sender.detail);assert.equal(receiver.state,'complete');assert.ok(frames<=3,`Expected at most 3 binary frames, got ${frames}`);
 });
 test('block protocol sends binary and empty files, with final verification',async()=>{
   const[a,b]=pair(),store=new Store(),Storage=storageClass(),received=[];const file=makeFile(BLOCK_SIZE+321);
@@ -64,7 +73,7 @@ test('source re-selection after refresh rejects changed bytes even with matching
  const changed=new Uint8Array(await file.arrayBuffer());changed[20]^=1;const[c,d]=pair();const secondReceiver=new BlockTransfer(d,{store,Storage});const sender=new BlockTransfer(c,{store,record:saved,reselected:true,files:[new File([changed],file.name,{lastModified:file.lastModified})]});await until(()=>sender.terminal());assert.equal(sender.state,'failed');assert.match(sender.detail,/source file changed/);await until(()=>secondReceiver.terminal());
 });
 test('backpressure waits for native bufferedamountlow before sending file bytes',async()=>{
- const[a,b]=pair(),store=new Store(),Storage=storageClass();const channel=new EventTarget();channel.bufferedAmount=2*1024*1024;a.dataChannel=channel;
+ const[a,b]=pair(),store=new Store(),Storage=storageClass();const channel=new EventTarget();channel.bufferedAmount=40*1024*1024;a.dataChannel=channel;
  const receiver=new BlockTransfer(b,{store,Storage,onOffer:(_,t)=>t.accept({storage:'test'})});const sender=new BlockTransfer(a,{store,files:[makeFile(10000)]});await until(()=>sender.state==='transferring');await sleep(100);assert.equal(receiver.record.files[0].next,0);assert.equal(receiver.block,null);channel.bufferedAmount=0;channel.dispatchEvent(new Event('bufferedamountlow'));await until(()=>sender.terminal());assert.equal(sender.state,'complete',sender.detail);
 });
 test('direct-save policy rejects browser storage before any payload is accepted',async()=>{

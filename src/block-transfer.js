@@ -2,7 +2,16 @@ import {BLOCK_SIZE,MAX_FILE_SIZE,records,BlockStorage,cleanPath,friendlyStorageE
 import {Integrity,blockHash} from './integrity.js';
 import {safeName} from './transfer.js';
 
-const VERSION=3,HEADER=36,MAX_FRAME=64*1024,MAX_CONTROL=48*1024;
+const VERSION=3,HEADER=36,MAX_FRAME=1024*1024,MAX_CONTROL=48*1024;
+const MIN_SEND_BUFFER=8*1024*1024,MAX_SEND_BUFFER=32*1024*1024;
+export function transportPlan(conn={}) {
+  const maxMessage=conn.peerConnection?.sctp?.maxMessageSize;
+  const frame=Math.min(MAX_FRAME,Number.isFinite(maxMessage)&&maxMessage>HEADER?maxMessage:16*1024);
+  const payload=Math.max(1024,frame-HEADER);
+  const high=Math.min(MAX_SEND_BUFFER,Math.max(MIN_SEND_BUFFER,payload*128));
+  const low=Math.min(high/2,Math.max(2*1024*1024,payload*32));
+  return {payload,high,low};
+}
 const UUID=/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const HEX=/^[0-9a-f]{64}$/;
 const CLOSED=new Set(['complete','failed','declined','cancelled']);
@@ -61,7 +70,7 @@ export class BlockTransfer {
     this.options.onUpdate?.({id:this.id,state:this.state,detail:this.detail||'',direction:this.direction,files:this.manifest||[],bytes,total:this.total,speed,eta:speed?(this.total-bytes)/speed:null,remotePaused:this.peerPaused,localPaused:this.localPaused,fileIndex:this.fileIndex||0,verifiedBytes:this.verifiedBytes||0});
   }
   attach(conn) {
-    const old=this.conn,previousQueue=this.queue;this.epoch++;const epoch=this.epoch;this.conn=conn;this.queue=previousQueue?.catch(()=>{})||Promise.resolve();this.queuedBytes=0;this.block=null;this.helloSeen=false;
+    const old=this.conn,previousQueue=this.queue;this.epoch++;const epoch=this.epoch;this.conn=conn;this.queue=previousQueue?.catch(()=>{})||Promise.resolve();this.queuedBytes=0;this.block=null;this.helloSeen=false;this.transport=transportPlan(conn);
     if(old&&old!==conn)old.close();this.rejectWaiters(new Interrupted('Reconnecting'));
     if(this.state==='reconnecting')this.transition('connecting');this.lastActivity=Date.now();
     conn.on('data',raw=>{
@@ -82,7 +91,7 @@ export class BlockTransfer {
           }
           this.queue=this.queue.then(()=>{this.guard(epoch);return this.receiveControl(m,epoch);}).catch(e=>this.handleError(e));
         }else {
-          const size=raw.byteLength||raw.size||0;this.queuedBytes+=size;if(this.queuedBytes>BLOCK_SIZE+2*1024*1024)throw Error('Peer sent too much data without acknowledgement.');
+          const size=raw.byteLength||raw.size||0;this.queuedBytes+=size;if(this.queuedBytes>BLOCK_SIZE+MAX_SEND_BUFFER)throw Error('Peer sent too much data without acknowledgement.');
           this.queue=this.queue.then(async()=>{try{this.guard(epoch);const data=raw instanceof Blob?await raw.arrayBuffer():raw;this.guard(epoch);this.receiveBinary(data);}finally{if(epoch===this.epoch)this.queuedBytes-=size;}}).catch(e=>this.handleError(e));
         }
       }catch(e){this.handleError(e);}
@@ -131,17 +140,20 @@ export class BlockTransfer {
     });
   }
   async writable(epoch) {
-    while(this.localPaused||this.peerPaused){this.guard(epoch);await new Promise(r=>setTimeout(r,100));}
-    this.guard(epoch);const dc=this.conn.dataChannel;
-    if(!dc||dc.bufferedAmount<1024*1024)return;
-    dc.bufferedAmountLowThreshold=256*1024;
-    await new Promise((resolve,reject)=>{
-      const finish=()=>{clearTimeout(timer);dc.removeEventListener('bufferedamountlow',low);dc.removeEventListener('close',closed);resolve();};
-      const low=()=>{if(dc.bufferedAmount<=dc.bufferedAmountLowThreshold)finish();};
-      const closed=()=>{finish();reject(new Interrupted('Connection closed'));};
-      const timer=setTimeout(finish,1000);dc.addEventListener('bufferedamountlow',low);dc.addEventListener('close',closed);low();
-    });
-    return this.writable(epoch);
+    for(;;) {
+      while(this.localPaused||this.peerPaused){this.guard(epoch);await new Promise(r=>setTimeout(r,100));}
+      this.guard(epoch);const dc=this.conn.dataChannel,{high,low:lowWater}=this.transport||transportPlan(this.conn);
+      if(!dc||dc.bufferedAmount<high)return;
+      dc.bufferedAmountLowThreshold=lowWater;
+      await new Promise((resolve,reject)=>{
+        let settled=false;
+        const cleanup=()=>{clearTimeout(timer);dc.removeEventListener('bufferedamountlow',lowEnough);dc.removeEventListener('close',closed);};
+        const finish=()=>{if(settled)return;settled=true;cleanup();resolve();};
+        const lowEnough=()=>{if(dc.bufferedAmount<=dc.bufferedAmountLowThreshold)finish();};
+        const closed=()=>{if(settled)return;settled=true;cleanup();reject(new Interrupted('Connection closed'));};
+        const timer=setTimeout(finish,1000);dc.addEventListener('bufferedamountlow',lowEnough);dc.addEventListener('close',closed);lowEnough();
+      });
+    }
   }
   async run(epoch) {
     this.manifest=manifestFor(this.files);this.total=this.manifest.reduce((n,f)=>n+f.size,0);
@@ -152,8 +164,7 @@ export class BlockTransfer {
     if(!Array.isArray(accepted.files)||accepted.files.length!==this.files.length)throw Error('Invalid saved transfer state.');
     await this.store.put(this.record);this.guard(epoch);
     this.peerPaused=!!accepted.paused;this.transition(this.localPaused||this.peerPaused?'paused':'transferring');
-    const maxMessage=this.conn.peerConnection?.sctp?.maxMessageSize;
-    const transport=Math.min(MAX_FRAME,Number.isFinite(maxMessage)&&maxMessage>HEADER?maxMessage:16*1024)-HEADER;
+    const transport=this.transport?.payload||transportPlan(this.conn).payload;
     for(let f=0;f<this.files.length;f++) {
       this.fileIndex=f;const file=this.files[f],state=this.record.files[f],remote=accepted.files[f],count=Math.ceil(file.size/BLOCK_SIZE);
       if(!Number.isInteger(remote.next)||remote.next<0||remote.next>count)throw Error('Invalid saved block offset.');
@@ -168,16 +179,18 @@ export class BlockTransfer {
       state.next=remote.next;state.checkpoint=checkpoint;state.complete=false;await this.store.put(this.record);
       const hash=new Integrity(checkpoint);
       try {
+        let pendingRead=state.next<count?file.slice(state.next*BLOCK_SIZE,Math.min(file.size,(state.next+1)*BLOCK_SIZE)).arrayBuffer():null;
         for(let b=state.next;b<count;b++) {
           await this.writable(epoch);
-          const bytes=await file.slice(b*BLOCK_SIZE,Math.min(file.size,(b+1)*BLOCK_SIZE)).arrayBuffer();this.guard(epoch);
+          const bytes=await pendingRead;this.guard(epoch);
+          pendingRead=b+1<count?file.slice((b+1)*BLOCK_SIZE,Math.min(file.size,(b+2)*BLOCK_SIZE)).arrayBuffer():null;
           const checkpoint=hash.update(bytes);checkpoint.catch(()=>{});
           const digest=await blockHash(bytes);this.guard(epoch);let attempts=0,ack;
           do {
             await this.writable(epoch);
             await this.request('block-start',{file:f,block:b,size:bytes.byteLength,hash:digest},'ready',epoch);
             for(let offset=0;offset<bytes.byteLength;offset+=transport) {
-              if(this.localPaused||this.peerPaused||(this.conn.dataChannel?.bufferedAmount||0)>=1024*1024)await this.writable(epoch);
+              if(this.localPaused||this.peerPaused||(this.conn.dataChannel?.bufferedAmount||0)>=(this.transport?.high||MIN_SEND_BUFFER))await this.writable(epoch);
               this.guard(epoch);this.conn.send(encodeChunk(this.id,f,b,offset,new Uint8Array(bytes,offset,Math.min(transport,bytes.byteLength-offset))));
             }
             ack=await this.request('block-end',{file:f,block:b},['block-ack','block-nack'],epoch);

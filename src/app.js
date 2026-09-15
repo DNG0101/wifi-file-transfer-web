@@ -49,7 +49,7 @@ function renderOnlineUsers(users=[]){
  for(const user of onlineUsers){
   const row=el('div',undefined,'online-user'),identity=el('div');identity.append(el('strong',user.name),el('small',connectedOnline.has(user.uuid)?'Connected · send or receive':user.peerId?'Available to connect':'Starting…'));
   row.append(identity);
-  if(user.uuid!==deviceId&&user.peerId){const connected=connectedOnline.has(user.uuid),connect=el('button',connected?'Connected':'Connect','secondary');connect.disabled=connected;connect.onclick=async()=>{connect.disabled=true;connect.textContent='Waiting for approval…';try{await ensureMainPeer();const member=directoryMember(user);await mainPeer.requestConnection(user.peerId,member);connectedOnline.set(user.uuid,member);notice(`${user.name} accepted the connection. Either device can now send.`);renderOnlineUsers(onlineUsers);renderDevices();}catch(e){notice(e.message,true);connect.disabled=false;connect.textContent='Connect';}};row.append(connect);}
+  if(user.uuid!==deviceId&&user.peerId){const connected=connectedOnline.has(user.uuid),connect=el('button',connected?'Disconnect':'Connect','secondary');connect.onclick=async()=>{if(connected){disconnectDevice(connectedOnline.get(user.uuid)||directoryMember(user));return;}connect.disabled=true;connect.textContent='Waiting for approval…';try{await ensureMainPeer();const member=directoryMember(user);await mainPeer.requestConnection(user.peerId,member);connectedOnline.set(user.uuid,member);notice(`${user.name} accepted the connection. Either device can now send.`);renderOnlineUsers(onlineUsers);renderDevices();}catch(e){notice(e.message,true);connect.disabled=false;connect.textContent='Connect';}};row.append(connect);}
   $('online-users').append(row);
  }
  renderDevices();
@@ -145,7 +145,20 @@ function renderDevices() {
     row.append(el('span','▣','device-icon'),identity,send);$('devices').append(row);
   }
   $('connected-panel').hidden=!available.length;$('connected-devices').replaceChildren();
-  for(const m of available){const row=el('div',undefined,'download');row.append(el('span',m.name+(m.trusted?' · Remembered':m.onlineDirectory?' · Online directory':'')));if(!m.onlineDirectory&&!m.trusted&&!trust?.contacts.some(c=>c.id===m.deviceId)){const remember=el('button','Remember device','secondary');remember.onclick=async()=>{remember.disabled=true;try{await trust.remember(m);notice('Device remembered. Next time, open this page on both devices.');}catch(e){notice(e.message,true);}finally{remember.disabled=false;}};row.append(remember);}$('connected-devices').append(row);}
+  for(const m of available){const row=el('div',undefined,'download');row.append(el('span',m.name+(m.trusted?' · Remembered':m.onlineDirectory?' · Online directory':'')));if(!m.onlineDirectory&&!m.trusted&&!trust?.contacts.some(c=>c.id===m.deviceId)){const remember=el('button','Remember device','secondary');remember.onclick=async()=>{remember.disabled=true;try{await trust.remember(m);notice('Device remembered. Next time, open this page on both devices.');}catch(e){notice(e.message,true);}finally{remember.disabled=false;}};row.append(remember);}const disconnect=el('button','Disconnect','secondary');disconnect.type='button';disconnect.setAttribute('aria-label','Disconnect '+m.name);disconnect.onclick=()=>disconnectDevice(m);row.append(disconnect);$('connected-devices').append(row);}
+}
+function disconnectDevice(member){
+ const id=member?.deviceId;if(!id)return;
+ if(selectedMember?.deviceId===id)resetPrepared();
+ let disconnected=false;
+ if(mainPeer?.authorized.has(id)||mainPeer?.connections.has(id))disconnected=mainPeer.disconnect(id)||disconnected;
+ const roomMember=[...(room?.members?.values()||[])].find(m=>m.deviceId===id&&m.id!==room?.id);
+ if(roomMember){disconnected=room.disconnect(roomMember.id)||disconnected;members=members.filter(m=>m.deviceId!==id);}
+ if(trust?.rooms?.has(id))disconnected=trust.disconnect(id)||disconnected;
+ connectedOnline.delete(id);
+ for(const entry of transfers.values())if(entry.member.deviceId===id&&!entry.transfer.terminal()){entry.transfer.reconnectAttempts=4;entry.transfer.conn?.close();}
+ renderOnlineUsers(onlineUsers);renderDevices();
+ notice(disconnected?`${member.name} disconnected. You can connect again later.`:`${member.name} is already disconnected.`);
 }
 function allMembers(){
  const directory=[...connectedOnline.values()].filter(m=>mainPeer?.authorized.get(m.deviceId)?.id===m.id);

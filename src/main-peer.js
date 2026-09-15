@@ -62,6 +62,7 @@ export class MainPeerManager{
   };
   conn.on('close',disconnected);conn.on('error',()=>{conn.close();disconnected();});
   conn.on('data',message=>{
+    if(message?.type==='disconnect'){conn.close();return;}
     if(message?.type!=='transfer-cancel'||typeof message.id!=='string'||message.id.length>64)return;
     const cancelled=this.onCancel(message.id,member)===true;
     if(conn.open)conn.send({type:'transfer-cancelled',id:message.id,cancelled});
@@ -139,6 +140,15 @@ export class MainPeerManager{
    const timer=setTimeout(()=>finish(false),5000);
    conn.on('data',receive);try{conn.send({type:'transfer-cancel',id});}catch{finish(false);}
   });
+ }
+ disconnect(deviceId){
+  const id=safe(deviceId),conn=this.connections.get(id),member=this.authorized.get(id);
+  if(!conn&&!member)return false;
+  if(conn?.open)try{conn.send({type:'disconnect'});}catch{}
+  conn?.close();
+  if(this.connections.get(id)===conn){this.connections.delete(id);this.authorized.delete(id);if(member)this.onDisconnected(member);}
+  else if(!conn&&member){this.authorized.delete(id);this.onDisconnected(member);}
+  return true;
  }
  setName(name){this.name=name;}
  async stop(){

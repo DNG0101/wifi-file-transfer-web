@@ -35,8 +35,8 @@ export async function checkTwoWayConnections(makeManager) {
   const spoof=new Channel('different-peer',{kind:'file-v3',deviceId:'a',name:'spoof'});
   spoof.other={open:false};b.accept(spoof);spoof.open=true;spoof.emit('open');
   assert(!spoof.open&&bIncoming===1,'Authorization must match peer ID as well as device ID');
-  a.connections.get('b').close();
-  assert(!a.authorized.size&&!b.authorized.size,'Closed control link must remove both authorizations');
+  assert(a.disconnect('b'),'Explicit disconnect should close the selected device');await tick();
+  assert(!a.authorized.size&&!b.authorized.size,'Explicit disconnect must remove both authorizations');
   let refused=false;try{a.connect(b.id,'third');}catch{refused=true;}
   assert(refused,'Sending must require a current approved connection');
   b.onConnectionRequest=()=>false;refused=false;
