@@ -181,6 +181,14 @@ export class Room {
     if (['file-v2','file-v3'].includes(conn.metadata?.kind) && member) this.cb.onTransfer?.(conn,member);
     else conn.on('open', () => { conn.send(JSON.stringify({type:'decline',reason:'This transfer channel is not authorized for the connected device.'})); this.later(() => conn.close(),300); });
   }
+  disconnect(id) {
+    if(this.closed||!id||id===this.id||!this.members.has(id))return false;
+    if(!this.host){if(id!==this.hostId)return false;this.close();return true;}
+    this.admitted.delete(id);const conn=this.links.get(id);
+    if(conn){conn.close();if(this.links.get(id)===conn){this.links.delete(id);this.members.delete(id);this.broadcast();}}
+    else {this.members.delete(id);this.broadcast();}
+    return true;
+  }
   connect(id,transferId) {
     if (this.closed || this.state !== 'connected' || this.peer.disconnected) throw Error('Room disconnected. Use Retry connection first.');
     if (!this.members.has(id)) throw Error('Device left the room.');
