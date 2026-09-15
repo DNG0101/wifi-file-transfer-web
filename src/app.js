@@ -153,7 +153,7 @@ function disconnectDevice(member){
  let disconnected=false;
  if(mainPeer?.authorized.has(id)||mainPeer?.connections.has(id))disconnected=mainPeer.disconnect(id)||disconnected;
  const roomMember=[...(room?.members?.values()||[])].find(m=>m.deviceId===id&&m.id!==room?.id);
- if(roomMember)disconnected=room.disconnect(roomMember.id)||disconnected;
+ if(roomMember){disconnected=room.disconnect(roomMember.id)||disconnected;members=members.filter(m=>m.deviceId!==id);}
  if(trust?.rooms?.has(id))disconnected=trust.disconnect(id)||disconnected;
  connectedOnline.delete(id);
  for(const entry of transfers.values())if(entry.member.deviceId===id&&!entry.transfer.terminal()){entry.transfer.reconnectAttempts=4;entry.transfer.conn?.close();}

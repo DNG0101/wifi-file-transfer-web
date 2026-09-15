@@ -5,6 +5,7 @@ Automated validation ran on GitHub Actions after applying the per-device disconn
 ## Changes validated
 
 - Explicit disconnect revokes the selected online device on both endpoints without forgetting it permanently.
+- QR/room and remembered-device paths are removed from the local connected-device list immediately when that device is disconnected.
 - Active transfers to a deliberately disconnected device retain verified progress and stop automatic reconnect attempts until the user resumes.
 - WebRTC file frames use the negotiated SCTP message size up to a 1 MiB safety cap instead of a fixed 64 KiB cap.
 - Data-channel backpressure uses an adaptive 8–32 MiB send window instead of the previous 1 MiB window.
