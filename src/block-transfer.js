@@ -2,8 +2,9 @@ import {BLOCK_SIZE,MAX_FILE_SIZE,records,BlockStorage,cleanPath,friendlyStorageE
 import {Integrity,blockHash} from './integrity.js';
 import {safeName} from './transfer.js';
 
-const VERSION=3,HEADER=36,MAX_FRAME=1024*1024,MAX_CONTROL=48*1024;
+const VERSION=4,HEADER=36,MAX_FRAME=1024*1024,MAX_CONTROL=48*1024;
 const MIN_SEND_BUFFER=8*1024*1024,MAX_SEND_BUFFER=32*1024*1024;
+const MAX_LANES=4,PARALLEL_THRESHOLD=16*1024*1024;
 export function transportPlan(conn={}) {
   const maxMessage=conn.peerConnection?.sctp?.maxMessageSize;
   const frame=Math.min(MAX_FRAME,Number.isFinite(maxMessage)&&maxMessage>HEADER?maxMessage:16*1024);
@@ -48,6 +49,7 @@ export class BlockTransfer {
     this.record=options.record;this.manifest=this.record?.manifest;this.id=this.record?.transferId||options.id||(this.files?crypto.randomUUID():null);
     this.token=this.record?.token||(this.files?secret():null);this.state='connecting';this.epoch=0;this.waiters=[];this.tasks=new Set();
     this.localPaused=false;this.peerPaused=false;this.lastActivity=Date.now();this.lastUI=0;this.samples=[];this.bytes=0;this.total=0;
+    this.lanes=new Map();this.lanePlans=new Map();
     this.attach(conn);
     this.heartbeat=setInterval(()=>{
       if(this.terminal())return;
@@ -70,7 +72,9 @@ export class BlockTransfer {
     this.options.onUpdate?.({id:this.id,state:this.state,detail:this.detail||'',direction:this.direction,files:this.manifest||[],bytes,total:this.total,speed,eta:speed?(this.total-bytes)/speed:null,remotePaused:this.peerPaused,localPaused:this.localPaused,fileIndex:this.fileIndex||0,verifiedBytes:this.verifiedBytes||0});
   }
   attach(conn) {
-    const old=this.conn,previousQueue=this.queue;this.epoch++;const epoch=this.epoch;this.conn=conn;this.queue=previousQueue?.catch(()=>{})||Promise.resolve();this.queuedBytes=0;this.block=null;this.helloSeen=false;this.transport=transportPlan(conn);
+    const old=this.conn,previousQueue=this.queue,oldLanes=[...(this.lanes?.values()||[])];this.epoch++;const epoch=this.epoch;this.conn=conn;this.queue=previousQueue?.catch(()=>{})||Promise.resolve();this.queuedBytes=0;this.block=null;this.helloSeen=false;this.transport=transportPlan(conn);
+    this.lanes=new Map([[0,conn]]);this.lanePlans=new Map([[0,this.transport]]);
+    for(const lane of oldLanes)if(lane!==old&&lane!==conn)lane.close();
     if(old&&old!==conn)old.close();this.rejectWaiters(new Interrupted('Reconnecting'));
     if(this.state==='reconnecting')this.transition('connecting');this.lastActivity=Date.now();
     conn.on('data',raw=>{
@@ -91,7 +95,7 @@ export class BlockTransfer {
           }
           this.queue=this.queue.then(()=>{this.guard(epoch);return this.receiveControl(m,epoch);}).catch(e=>this.handleError(e));
         }else {
-          const size=raw.byteLength||raw.size||0;this.queuedBytes+=size;if(this.queuedBytes>BLOCK_SIZE+MAX_SEND_BUFFER)throw Error('Peer sent too much data without acknowledgement.');
+          const size=raw.byteLength||raw.size||0;this.queuedBytes+=size;if(this.queuedBytes>BLOCK_SIZE+MAX_SEND_BUFFER*MAX_LANES)throw Error('Peer sent too much data without acknowledgement.');
           this.queue=this.queue.then(async()=>{try{this.guard(epoch);const data=raw instanceof Blob?await raw.arrayBuffer():raw;this.guard(epoch);this.receiveBinary(data);}finally{if(epoch===this.epoch)this.queuedBytes-=size;}}).catch(e=>this.handleError(e));
         }
       }catch(e){this.handleError(e);}
@@ -101,6 +105,55 @@ export class BlockTransfer {
     if(this.files){const start=()=>this.trackTask(this.run(epoch).catch(e=>this.handleError(e)));if(conn.open)queueMicrotask(start);else conn.on('open',start);}
   }
   trackTask(promise){this.tasks.add(promise);promise.then(()=>this.tasks.delete(promise),()=>this.tasks.delete(promise));return promise;}
+  planFor(conn){
+    for(const [index,lane] of this.lanes)if(lane===conn)return this.lanePlans.get(index)||transportPlan(conn);
+    return transportPlan(conn);
+  }
+  addLane(conn,index,epoch=this.epoch){
+    if(!conn||!Number.isInteger(index)||index<=0||index>=MAX_LANES){conn?.close?.();return false;}
+    const previous=this.lanes.get(index);if(previous&&previous!==conn)previous.close();
+    this.lanes.set(index,conn);this.lanePlans.set(index,transportPlan(conn));
+    conn.on('data',raw=>{
+      if(epoch!==this.epoch||this.terminal()||this.lanes.get(index)!==conn)return;
+      this.lastActivity=Date.now();
+      if(typeof raw==='string'){conn.close();return;}
+      const size=raw.byteLength||raw.size||0;this.queuedBytes+=size;
+      if(this.queuedBytes>BLOCK_SIZE+MAX_SEND_BUFFER*MAX_LANES){this.handleError(Error('Peer sent too much parallel data without acknowledgement.'));conn.close();return;}
+      const prior=conn._wftQueue||Promise.resolve();
+      conn._wftQueue=prior.then(async()=>{try{this.guard(epoch);const data=raw instanceof Blob?await raw.arrayBuffer():raw;this.guard(epoch);this.receiveBinary(data,epoch);}finally{if(epoch===this.epoch)this.queuedBytes-=size;}}).catch(e=>this.handleError(e));
+    });
+    const lost=()=>{
+      if(this.lanes.get(index)!==conn)return;
+      this.lanes.delete(index);this.lanePlans.delete(index);
+      // A lane disappearing with an incomplete block can strand bytes that were
+      // already queued on that SCTP association. Force the normal verified-block
+      // reconnect path instead of guessing which ranges arrived.
+      if(this.block&&!this.terminal())this.conn?.close();
+    };
+    conn.on('close',lost);conn.on('error',()=>{conn.close();lost();});
+    return true;
+  }
+  async openTurboLanes(epoch){
+    if(!this.options.openLane||this.total<PARALLEL_THRESHOLD)return;
+    const desired=Math.min(MAX_LANES,Math.max(2,Number(this.options.laneCount)||3));
+    for(let index=1;index<desired;index++){
+      this.guard(epoch);
+      try{this.addLane(this.options.openLane(index),index,epoch);}catch{}
+    }
+    // Let PeerJS start the extra ICE/SCTP handshakes without delaying the transfer.
+    await Promise.resolve();this.guard(epoch);
+  }
+  pickLane(){
+    const ready=[];
+    for(const [index,conn] of this.lanes){
+      if(!conn?.open)continue;const plan=this.lanePlans.get(index)||transportPlan(conn),dc=conn.dataChannel;
+      ready.push({index,conn,plan,score:(dc?.bufferedAmount||0)/Math.max(1,plan.high)});
+    }
+    if(!ready.length)return {index:0,conn:this.conn,plan:this.transport||transportPlan(this.conn),score:Infinity};
+    const uncongested=ready.filter(item=>item.score<0.75);
+    if(uncongested.length){const cursor=(this.laneCursor||0)%uncongested.length;this.laneCursor=(cursor+1)%1024;return uncongested[cursor];}
+    return ready.reduce((best,item)=>item.score<best.score?item:best,ready[0]);
+  }
   handleCancellation(raw,conn){
     if(conn!==this.conn||typeof raw!=='string'||raw.length>MAX_CONTROL)return false;
     let message;try{message=JSON.parse(raw);}catch{return false;}
@@ -120,7 +173,7 @@ export class BlockTransfer {
       this.finishCancellation=confirmed=>{
         if(settled)return;settled=true;clearTimeout(timer);conn.off?.('open',sendCancel);resolve(confirmed);
         this.detail=confirmed?'Transfer cancelled on both devices.':'Cancelled locally. The other device could not be reached.';
-        this.emit(true);conn?.close();
+        this.emit(true);for(const lane of this.lanes.values())lane.close();
       };
     });
     conn.on('open',sendCancel);sendCancel();
@@ -139,10 +192,10 @@ export class BlockTransfer {
       this.waiters.push(waiter);try{this.send(type,extra);}catch(e){this.waiters.pop();waiter.reject(e);}
     });
   }
-  async writable(epoch) {
+  async writable(epoch,conn=this.conn) {
     for(;;) {
       while(this.localPaused||this.peerPaused){this.guard(epoch);await new Promise(r=>setTimeout(r,100));}
-      this.guard(epoch);const dc=this.conn.dataChannel,{high,low:lowWater}=this.transport||transportPlan(this.conn);
+      this.guard(epoch);const dc=conn?.dataChannel,{high,low:lowWater}=this.planFor(conn);
       if(!dc||dc.bufferedAmount<high)return;
       dc.bufferedAmountLowThreshold=lowWater;
       await new Promise((resolve,reject)=>{
@@ -164,7 +217,7 @@ export class BlockTransfer {
     if(!Array.isArray(accepted.files)||accepted.files.length!==this.files.length)throw Error('Invalid saved transfer state.');
     await this.store.put(this.record);this.guard(epoch);
     this.peerPaused=!!accepted.paused;this.transition(this.localPaused||this.peerPaused?'paused':'transferring');
-    const transport=this.transport?.payload||transportPlan(this.conn).payload;
+    await this.openTurboLanes(epoch);
     for(let f=0;f<this.files.length;f++) {
       this.fileIndex=f;const file=this.files[f],state=this.record.files[f],remote=accepted.files[f],count=Math.ceil(file.size/BLOCK_SIZE);
       if(!Number.isInteger(remote.next)||remote.next<0||remote.next>count)throw Error('Invalid saved block offset.');
@@ -179,19 +232,27 @@ export class BlockTransfer {
       state.next=remote.next;state.checkpoint=checkpoint;state.complete=false;await this.store.put(this.record);
       const hash=new Integrity(checkpoint);
       try {
-        let pendingRead=state.next<count?file.slice(state.next*BLOCK_SIZE,Math.min(file.size,(state.next+1)*BLOCK_SIZE)).arrayBuffer():null;
+        const prepareBlock=b=>b<count?(async()=>{
+          const bytes=await file.slice(b*BLOCK_SIZE,Math.min(file.size,(b+1)*BLOCK_SIZE)).arrayBuffer();
+          return {bytes,digest:await blockHash(bytes)};
+        })():null;
+        let pendingBlock=prepareBlock(state.next);
         for(let b=state.next;b<count;b++) {
           await this.writable(epoch);
-          const bytes=await pendingRead;this.guard(epoch);
-          pendingRead=b+1<count?file.slice((b+1)*BLOCK_SIZE,Math.min(file.size,(b+2)*BLOCK_SIZE)).arrayBuffer():null;
-          const checkpoint=hash.update(bytes);checkpoint.catch(()=>{});
-          const digest=await blockHash(bytes);this.guard(epoch);let attempts=0,ack;
+          const prepared=await pendingBlock;this.guard(epoch);
+          pendingBlock=prepareBlock(b+1);
+          const bytes=prepared.bytes,digest=prepared.digest,checkpoint=hash.update(bytes);checkpoint.catch(()=>{});
+          let attempts=0,ack;
           do {
             await this.writable(epoch);
             await this.request('block-start',{file:f,block:b,size:bytes.byteLength,hash:digest},'ready',epoch);
-            for(let offset=0;offset<bytes.byteLength;offset+=transport) {
-              if(this.localPaused||this.peerPaused||(this.conn.dataChannel?.bufferedAmount||0)>=(this.transport?.high||MIN_SEND_BUFFER))await this.writable(epoch);
-              this.guard(epoch);this.conn.send(encodeChunk(this.id,f,b,offset,new Uint8Array(bytes,offset,Math.min(transport,bytes.byteLength-offset))));
+            for(let offset=0;offset<bytes.byteLength;) {
+              const selected=this.pickLane();
+              await this.writable(epoch,selected.conn);this.guard(epoch);
+              const length=Math.min(selected.plan.payload,bytes.byteLength-offset);
+              try{selected.conn.send(encodeChunk(this.id,f,b,offset,new Uint8Array(bytes,offset,length)));}
+              catch(error){if(selected.index){this.lanes.delete(selected.index);this.lanePlans.delete(selected.index);continue;}throw error;}
+              offset+=length;
             }
             ack=await this.request('block-end',{file:f,block:b},['block-ack','block-nack'],epoch);
             if(ack.file!==f||ack.block!==b)throw Error('Acknowledgement belongs to another block.');
@@ -206,7 +267,7 @@ export class BlockTransfer {
         this.transition(this.localPaused||this.peerPaused?'paused':'transferring');
       }finally{hash.close();}
     }
-    await this.request('finish',{},'complete',epoch);this.record.state='complete';await this.store.put(this.record);this.transition('complete','Receiver verified and saved all files.');clearInterval(this.heartbeat);setTimeout(()=>this.conn.close(),500);
+    await this.request('finish',{},'complete',epoch);this.record.state='complete';await this.store.put(this.record);this.transition('complete','Receiver verified and saved all files.');clearInterval(this.heartbeat);setTimeout(()=>{for(const lane of this.lanes.values())lane.close();},500);
   }
   async receiveControl(m,epoch) {
     if(m.type==='hello') {
@@ -229,15 +290,13 @@ export class BlockTransfer {
     if(m.type==='block-start') {
       if(!Number.isInteger(m.file)||m.file<0)throw Error('Invalid file index.');const file=this.manifest[m.file],state=this.record.files[m.file];
       if(this.block||!file||state.complete||!Number.isInteger(m.block)||m.block!==state.next||m.size!==Math.min(BLOCK_SIZE,file.size-m.block*BLOCK_SIZE)||m.size<=0||!HEX.test(m.hash))throw Error('Invalid block metadata.');
-      this.block={file:m.file,index:m.block,hash:m.hash,data:new Uint8Array(m.size),received:0};this.send('ready',{file:m.file,block:m.block});return;
+      this.block={file:m.file,index:m.block,hash:m.hash,data:new Uint8Array(m.size),received:0,ranges:[],endSeen:false,finalizing:null};this.send('ready',{file:m.file,block:m.block});return;
     }
     if(m.type==='block-end') {
-      const block=this.block;if(!block||m.file!==block.file||m.block!==block.index||block.received!==block.data.length)throw Error('Incomplete file block.');
-      this.block=null;const digest=await blockHash(block.data);this.guard(epoch);
-      if(digest!==block.hash){this.send('block-nack',{file:m.file,block:m.block});return;}
-      await this.storage.write(m.file,m.block,block.data);this.guard(epoch);
-      const state=this.record.files[m.file];state.hashes[m.block]=digest;state.next=m.block+1;this.record.updated=Date.now();await this.store.put(this.record);this.guard(epoch);
-      this.send('block-ack',{file:m.file,block:m.block,hash:digest});this.emit();return;
+      const block=this.block;if(!block||m.file!==block.file||m.block!==block.index)throw Error('Unexpected file block end.');
+      block.endSeen=true;
+      if(block.received===block.data.length)await this.finalizeBlock(block,epoch);
+      return;
     }
     if(m.type==='file-finish') {
       if(!Number.isInteger(m.file)||m.file<0)throw Error('Invalid file index.');const state=this.record.files[m.file],file=this.manifest[m.file];if(!file||!state||state.next!==Math.ceil(file.size/BLOCK_SIZE)||!HEX.test(m.hash)||this.block)throw Error('Cannot verify an incomplete file.');
@@ -255,10 +314,26 @@ export class BlockTransfer {
     }
     throw Error('Unknown transfer message.');
   }
-  receiveBinary(raw) {
+  async finalizeBlock(block,epoch){
+    if(block.finalizing)return block.finalizing;
+    if(!block.endSeen||block.received!==block.data.length)return;
+    block.finalizing=(async()=>{
+      const digest=await blockHash(block.data);this.guard(epoch);
+      if(digest!==block.hash){if(this.block===block)this.block=null;this.send('block-nack',{file:block.file,block:block.index});return;}
+      await this.storage.write(block.file,block.index,block.data);this.guard(epoch);
+      const state=this.record.files[block.file];state.hashes[block.index]=digest;state.next=block.index+1;this.record.updated=Date.now();await this.store.put(this.record);this.guard(epoch);
+      if(this.block===block)this.block=null;this.send('block-ack',{file:block.file,block:block.index,hash:digest});this.emit();
+    })();
+    return block.finalizing;
+  }
+  receiveBinary(raw,epoch=this.epoch) {
     const frame=decodeChunk(raw,this.id),block=this.block;
-    if(!block||frame.file!==block.file||frame.block!==block.index||frame.offset!==block.received||frame.offset+frame.bytes.length>block.data.length)throw Error('Out-of-order or unexpected file data.');
-    block.data.set(frame.bytes,frame.offset);block.received+=frame.bytes.length;
+    if(!block||frame.file!==block.file||frame.block!==block.index)throw Error('Unexpected file data.');
+    const start=frame.offset,end=start+frame.bytes.length;
+    if(start<0||end>block.data.length||!frame.bytes.length)throw Error('File frame is outside its block.');
+    for(const [left,right] of block.ranges)if(start<right&&end>left)throw Error('Duplicate or overlapping file frame.');
+    block.data.set(frame.bytes,start);block.ranges.push([start,end]);block.received+=frame.bytes.length;
+    if(block.endSeen&&block.received===block.data.length&&!block.finalizing)this.trackTask(this.finalizeBlock(block,epoch).catch(e=>this.handleError(e)));
   }
   accept(destination){return this.trackTask(this.acceptDestination(destination));}
   async acceptDestination(destination) {
@@ -275,6 +350,7 @@ export class BlockTransfer {
   resume(){if(this.state==='reconnecting'){this.options.onInterrupted?.(this);return;}this.localPaused=false;if(this.conn.open)this.send('resume');this.refreshPause();}
   interrupted(detail) {
     if(this.terminal()||this.state==='reconnecting')return;
+    for(const [index,lane] of this.lanes||[])if(index)lane.close();
     this.epoch++;this.block=null;
     this.rejectWaiters(new Interrupted(detail));this.transition('reconnecting',detail);this.options.onInterrupted?.(this);
   }
@@ -297,6 +373,6 @@ export class BlockTransfer {
     // Set the acknowledgement listener before publishing the terminal UI state.
     if(state==='cancelled'&&notify)this.beginCancellation();
     this.transition(state,detail);
-    if(state!=='cancelled'||!notify){const conn=this.conn;setTimeout(()=>conn.close(),state==='cancelled'?5000:1000);}
+    if(state!=='cancelled'||!notify){const lanes=[...this.lanes.values()];setTimeout(()=>{for(const lane of lanes)lane.close();},state==='cancelled'?5000:1000);}
   }
 }

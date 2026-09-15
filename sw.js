@@ -1,5 +1,5 @@
 // Network first: an old installed app must receive the new protocol and interface.
-const CACHE='wft-shell-v23';
+const CACHE='wft-shell-v24';
 const SHELL=['./','./index.html','./assets/app.css?v=4.11.0','./assets/app.js?v=4.11.0','./assets/hash-worker.js','./favicon.svg','./manifest.webmanifest','./connection-config.json'];
 self.addEventListener('install',event=>event.waitUntil((async()=>{const cache=await caches.open(CACHE);await cache.addAll(SHELL);await self.skipWaiting();})()));
 self.addEventListener('activate',event=>event.waitUntil((async()=>{for(const key of await caches.keys())if(key.startsWith('wft-shell-')&&key!==CACHE)await caches.delete(key);await self.clients.claim();})()));
