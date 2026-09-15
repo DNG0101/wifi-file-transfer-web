@@ -1,0 +1,40 @@
+name: v4.12 Multi-lane validation
+
+on:
+  push:
+    branches:
+      - perf/multi-lane-transfer-v412
+
+permissions:
+  contents: write
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: perf/multi-lane-transfer-v412
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Apply multi-lane patch
+        run: python3 scripts/patch-v412.py
+      - name: Install dependencies
+        run: npm ci
+      - name: Run full test suite
+        run: npm test
+      - name: Build production bundle
+        run: npm run build
+      - name: Syntax check generated bundle
+        run: node --check assets/app.js
+      - name: Commit validated release candidate
+        run: |
+          rm -f scripts/patch-v412.py .github/workflows/v412-multilane.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "Add multi-lane WebRTC transfer acceleration; v4.12.0"
+          git push origin HEAD:perf/multi-lane-transfer-v412
