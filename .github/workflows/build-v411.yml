@@ -24,8 +24,29 @@ jobs:
           node-version: '22'
           cache: npm
 
-      - name: Apply source patch
-        run: python scripts/patch-v411.py
+      - name: Apply source patch and final cleanup
+        run: |
+          if grep -q '"version": "4.10.0"' package.json; then
+            python scripts/patch-v411.py
+          fi
+          python - <<'PY'
+          from pathlib import Path
+
+          app = Path('src/app.js')
+          text = app.read_text(encoding='utf-8')
+          old = "if(roomMember)disconnected=room.disconnect(roomMember.id)||disconnected;\n if(trust?.rooms?.has(id))"
+          new = "if(roomMember){disconnected=room.disconnect(roomMember.id)||disconnected;members=members.filter(m=>m.deviceId!==id);}\n if(trust?.rooms?.has(id))"
+          if old in text:
+              text = text.replace(old, new, 1)
+              app.write_text(text, encoding='utf-8')
+          elif "members=members.filter(m=>m.deviceId!==id)" not in text:
+              raise SystemExit('Room disconnect cleanup target was not found')
+
+          readme = Path('README.md')
+          readme_text = readme.read_text(encoding='utf-8')
+          if '# Wi-Fi File Transfer — version 4.10.0' in readme_text:
+              readme.write_text(readme_text.replace('# Wi-Fi File Transfer — version 4.10.0','# Wi-Fi File Transfer — version 4.11.0',1),encoding='utf-8')
+          PY
 
       - name: Install pinned dependencies
         run: npm ci
@@ -49,6 +70,7 @@ jobs:
           ## Changes validated
 
           - Explicit disconnect revokes the selected online device on both endpoints without forgetting it permanently.
+          - QR/room and remembered-device paths are removed from the local connected-device list immediately when that device is disconnected.
           - Active transfers to a deliberately disconnected device retain verified progress and stop automatic reconnect attempts until the user resumes.
           - WebRTC file frames use the negotiated SCTP message size up to a 1 MiB safety cap instead of a fixed 64 KiB cap.
           - Data-channel backpressure uses an adaptive 8–32 MiB send window instead of the previous 1 MiB window.
@@ -66,10 +88,14 @@ jobs:
           Actual throughput remains bounded by Wi-Fi link quality, browser WebRTC/SCTP implementation, CPU, and storage speed; the optimization removes application-side under-filling but does not promise a fixed speed multiplier on every device.
           EOF
 
-      - name: Commit generated source and bundle
+      - name: Commit generated source and bundle when changed
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add -A
-          git commit -m "Add per-device disconnect and accelerate WebRTC transfers; v4.11.0"
-          git push origin HEAD:fix/per-user-disconnect-turbo-transfer
+          if git diff --cached --quiet; then
+            echo "No generated changes to commit."
+          else
+            git commit -m "Finalize per-device disconnect and turbo transfer; v4.11.0"
+            git push origin HEAD:fix/per-user-disconnect-turbo-transfer
+          fi
