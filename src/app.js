@@ -1,3 +1,4 @@
+import {bindParallelism} from './parallelism.js';
 import {folderArchive} from './folder-archive.js';
 import {transferBatches} from './send-queue.js';
 import {Room,newCode,parseRoom} from './room.js';
@@ -13,6 +14,7 @@ import {connectionDiagnosis,failedChannelMessage} from './connection-health.js';
 import qrcode from 'qrcode-generator';
 
 const $ = id => document.getElementById(id);
+const selectedParallelism=bindParallelism($('transfer-lanes'),$('transfer-parallelism-value'));
 const number=(n,digits=0)=>new Intl.NumberFormat(undefined,{maximumFractionDigits:digits}).format(n);
 const fmt = n => n<1024?`${number(n)} B`:n<1048576?`${number(n/1024,1)} KB`:n<1073741824?`${number(n/1048576,1)} MB`:`${number(n/1073741824,2)} GB`;
 const transfers=new Map(),peerQueues=new Map(),cancelBarriers=new Map(),cancelledTransfers=new Map();
@@ -289,7 +291,7 @@ function track(conn,member,outgoing,record,batch=files) {
  const row={id:record?.transferId||conn.metadata?.transferId||crypto.randomUUID(),peer:member.name,direction:outgoing?'send':'receive',state:'connecting',files:[],bytes:0,total:0,time:new Date().toISOString()};
  history.unshift(row);history=history.slice(0,Math.max(50,transfers.size+1));drawHistory();$('history').closest('details').open=true;
  const t=new BlockTransfer(conn,{files:outgoing?[...batch]:undefined,record,id:row.id,senderId:outgoing?deviceId:member.deviceId,receiverId:outgoing?member.deviceId:deviceId,reselected:!!record,requireDirectory:false,
- openLane:outgoing&&member.room.connectLane?lane=>member.room.connectLane(member.id,row.id,lane):undefined,laneCount:3,
+ openLane:outgoing&&member.room.connectLane?lane=>member.room.connectLane(member.id,row.id,lane):undefined,laneCount:selectedParallelism().lanes,
  onCancel:id=>notifyCancellation(id,member),onCleanupError:error=>{debug('Cleanup needs retry: '+error.message);void renderRecovery();},
  onUpdate:update=>{
   const terminal=['complete','failed','cancelled','declined'].includes(update.state);
@@ -534,3 +536,4 @@ if(!window.isSecureContext||!window.RTCPeerConnection) {
 }
 if('serviceWorker' in navigator)navigator.serviceWorker.register('./sw.js').catch(()=>{});
 drawHistory();renderDevices();renderOnlineUsers();void startupStorageReady.then(renderRecovery);
+

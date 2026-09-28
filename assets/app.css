@@ -8,3 +8,6 @@
 
 /* One entry point and explicit per-device sending. */
 .modes{grid-template-columns:1fr}.device{padding:14px;border-radius:10px}.device-details{display:flex;flex:1;min-width:0;flex-direction:column;gap:5px;overflow-wrap:anywhere}.device-details .muted{margin:0;width:auto}.device>button{flex:none}.device:focus-within{border-color:var(--accent)}#send-panel{scroll-margin-top:90px}
+
+
+.parallelism-control{margin:20px 0;padding:16px;border:1px solid var(--border);border-radius:10px}.parallelism-control label{font-weight:650}.parallelism-control output{display:block;margin:8px 0;color:var(--accent)}.parallelism-control input[type=range]{display:block;width:100%;min-height:44px;padding:0;accent-color:var(--accent);cursor:pointer}

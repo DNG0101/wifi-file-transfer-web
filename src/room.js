@@ -1,3 +1,4 @@
+import {MAX_LANES} from './parallelism.js';
 import * as PeerModule from 'peerjs';
 // PeerJS's CJS wrapper exposes named exports differently in Node and bundlers.
 const Peer = PeerModule.Peer || PeerModule.default.Peer || PeerModule.default;
@@ -196,7 +197,7 @@ export class Room {
   }
   connectLane(id,transferId,lane){
     if(this.closed||this.state!=='connected'||this.peer.disconnected||!this.members.has(id))throw Error('Device is no longer connected.');
-    if(!transferId||!Number.isInteger(lane)||lane<=0||lane>=4)throw Error('Invalid parallel transfer lane.');
+    if(!transferId||!Number.isInteger(lane)||lane<=0||lane>=MAX_LANES)throw Error('Invalid parallel transfer lane.');
     return this.peer.connect(id,{reliable:true,serialization:'raw',metadata:{kind:'file-v5',transferId,lane}});
   }
   probe(id,timeout=20000){
@@ -230,3 +231,4 @@ export async function probeNetwork(timeout = 12000) {
     return {local:counts.host>0,stun:counts.srflx>0,relay:counts.relay>0};
   } finally { clearTimeout(timer);pc.close(); }
 }
+

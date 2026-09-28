@@ -15,7 +15,7 @@ export async function appConcurrencyChecks(source){
  const el=(tag,text)=>({tag,textContent:text,children:[],hidden:false,append(...children){this.children.push(...children);},replaceChildren(){this.children=[];},setAttribute(){},closest(){return this;},showModal(){this.open=true;},close(){this.open=false;},focus(){}});
  const $=id=>{if(!nodes.has(id))nodes.set(id,el('div'));return nodes.get(id);};
  const notice=()=>{},debug=()=>{},controls=()=>{},renderRecovery=async()=>{},scheduleReconnect=()=>{},receivedFile=()=>{},refreshAcceptance=async()=>{};
- const records={remove:async()=>{}},manifestFor=files=>files;
+ const records={remove:async()=>{}},manifestFor=files=>files,selectedParallelism=()=>({lanes:8,blocks:16});
  class BlockTransfer{
   constructor(conn,options){Object.assign(this,{conn,options,id:options.id,direction:options.files?'send':'receive',state:'connecting',manifest:options.files||[],total:0});this.record={id:this.id};}
   terminal(){return ['complete','cancelled','declined','failed'].includes(this.state);}

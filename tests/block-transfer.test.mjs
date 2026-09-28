@@ -109,3 +109,37 @@ test('sliding window keeps multiple durable blocks in flight before earlier ACKs
   const store=new Store(),Storage=storageClass(),receiver=new BlockTransfer(b,{store,Storage,onOffer:(_,t)=>t.accept({storage:'test'})});
   const sender=new BlockTransfer(a,{store,files:[makeFile(BLOCK_SIZE*4+777)]});await until(()=>sender.terminal());assert.equal(sender.state,'complete',sender.detail);assert.equal(receiver.state,'complete');assert.ok(maxOutstanding>=2,`expected pipelined blocks, saw ${maxOutstanding}`);
 });
+
+
+test('50 lanes negotiate 100 blocks and transfer a single file with serialized writes',async()=>{
+ const [a,b]=pair(),store=new Store(),Base=storageClass();let writers=0,maxWriters=0;const used=new Set();
+ class Serial extends Base{async write(...args){writers++;maxWriters=Math.max(maxWriters,writers);await sleep(2);await super.write(...args);writers--;}}
+ const receiver=new BlockTransfer(b,{store,Storage:Serial,onOffer:(_,t)=>t.accept({storage:'test'})});
+ const sender=new BlockTransfer(a,{store,files:[makeFile(BLOCK_SIZE*2+12345)],laneCount:50,openLane:index=>{
+  const [out,inc]=pair(raw=>{if(raw instanceof ArrayBuffer)used.add(index);return raw;});assert.equal(receiver.addLane(inc,index),true);return out;
+ }});
+ await until(()=>sender.terminal());assert.equal(sender.state,'complete',sender.detail);assert.equal(receiver.state,'complete');
+ assert.deepEqual(sender.parallelism,{lanes:50,blocks:100});assert.deepEqual(receiver.parallelism,sender.parallelism);assert.equal(sender.lanes.size,50);assert.equal(used.size,49);assert.equal(maxWriters,1);
+});
+test('sender falls back to original limits when receiver omits negotiation',async()=>{
+ const [a,b]=pair(raw=>{if(typeof raw==='string'){const m=JSON.parse(raw);if(m.type==='accept'){delete m.parallelism;return JSON.stringify(m);}}return raw;});
+ const store=new Store(),receiver=new BlockTransfer(b,{store,Storage:storageClass(),onOffer:(_,t)=>t.accept({storage:'test'})});
+ const sender=new BlockTransfer(a,{store,files:[makeFile(1000)],laneCount:50});await until(()=>sender.terminal());assert.equal(sender.state,'complete',sender.detail);assert.deepEqual(sender.parallelism,{lanes:3,blocks:4});assert.equal(receiver.state,'complete');
+});
+test('invalid peer parallelism fails before file acceptance or payload',async()=>{
+ const [a,b]=pair(raw=>{if(typeof raw==='string'){const m=JSON.parse(raw);if(m.type==='hello'){m.parallelism={lanes:50,blocks:101};return JSON.stringify(m);}}return raw;});
+ const store=new Store();let offered=false;
+ const receiver=new BlockTransfer(b,{store,Storage:storageClass(),onOffer:()=>{offered=true;}}),sender=new BlockTransfer(a,{store,files:[makeFile(1)]});
+ await until(()=>sender.terminal());assert.equal(sender.state,'failed');assert.equal(receiver.state,'failed');assert.equal(offered,false);assert.match(sender.detail,/parallelism/);
+});
+
+test('negotiated 100-block receiver window accepts its last slot and rejects overflow',async()=>{
+ const [a,b]=pair(),receiver=new BlockTransfer(b,{store:new Store(),Storage:storageClass()});
+ receiver.id=crypto.randomUUID();receiver.parallelism={lanes:50,blocks:100};receiver.manifest=[{size:BLOCK_SIZE*101}];receiver.record={files:[{next:0,complete:false}]};receiver.storage={};
+ try{
+  await receiver.receiveControl({type:'block-start',file:0,block:99,size:BLOCK_SIZE,hash:'0'.repeat(64)},receiver.epoch);
+  assert.equal(receiver.blocks.size,1);
+  await assert.rejects(()=>receiver.receiveControl({type:'block-start',file:0,block:100,size:BLOCK_SIZE,hash:'0'.repeat(64)},receiver.epoch),/Invalid block/);
+  const [extra]=pair();assert.equal(receiver.addLane(extra,50),false);assert.equal(extra.open,false);
+ }finally{clearInterval(receiver.heartbeat);receiver.state='complete';a.close();}
+});

@@ -1,3 +1,4 @@
+import {MAX_LANES} from './parallelism.js';
 import * as PeerModule from 'peerjs';
 import {peerOptions} from './room.js';
 const Peer=PeerModule.Peer||PeerModule.default.Peer||PeerModule.default;
@@ -177,7 +178,7 @@ export class MainPeerManager{
  connectLane(remoteId,transferId,lane){
   const peer=shared.peer||this.peer,id=safe(remoteId);
   if(!peer||peer.disconnected)throw Error('Main peer is not ready in this tab.');
-  if(!id||id===peer.id||!Number.isInteger(lane)||lane<=0||lane>=4)throw Error('Invalid parallel transfer lane.');
+  if(!id||id===peer.id||!Number.isInteger(lane)||lane<=0||lane>=MAX_LANES)throw Error('Invalid parallel transfer lane.');
   if(![...this.authorized.values()].some(member=>member.id===id))throw Error('Connect to this device and wait for approval first.');
   return peer.connect(id,{reliable:true,serialization:'raw',metadata:{kind:'file-v5',transferId,lane,deviceId:this.uuid,name:this.name.slice(0,48)}});
  }
@@ -236,3 +237,4 @@ export class MainPeerManager{
   this.state('offline','Main peer subscription stopped.');
  }
 }
+

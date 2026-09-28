@@ -1,6 +1,6 @@
 {
   "name": "wifi-file-transfer-web",
-  "version": "4.13.0",
+  "version": "4.14.0",
   "private": true,
   "type": "module",
   "scripts": {
@@ -24,3 +24,4 @@
     "playwright": "1.62.1"
   }
 }
+

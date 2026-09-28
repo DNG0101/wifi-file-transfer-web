@@ -1,11 +1,13 @@
 import {BLOCK_SIZE,MAX_FILE_SIZE,records,BlockStorage,cleanPath,friendlyStorageError} from './storage.js';
 import {Integrity,blockHash} from './integrity.js';
 import {safeName} from './transfer.js';
+import {parallelism,validateParallelism} from './parallelism.js';
 
 const VERSION=5,HEADER=36,MAX_FRAME=1024*1024,MAX_CONTROL=48*1024;
 const MIN_SEND_BUFFER=8*1024*1024,MAX_SEND_BUFFER=32*1024*1024;
-const MAX_LANES=4,PARALLEL_THRESHOLD=16*1024*1024;
-const DEFAULT_BLOCK_WINDOW=4,MAX_BLOCK_WINDOW=6,RANGE_BUCKET=64*1024;
+const PARALLEL_THRESHOLD=16*1024*1024,RANGE_BUCKET=64*1024;
+// Bound aggregate network buffering, even when many lanes are requested.
+const TOTAL_SEND_BUFFER=32*1024*1024;
 export function transportPlan(conn={}) {
   const maxMessage=conn.peerConnection?.sctp?.maxMessageSize;
   const frame=Math.min(MAX_FRAME,Number.isFinite(maxMessage)&&maxMessage>HEADER?maxMessage:16*1024);
@@ -47,6 +49,7 @@ export class BlockTransfer {
   constructor(conn,options={}) {
     this.options=options;this.store=options.store||records;this.Storage=options.Storage||BlockStorage;
     this.direction=options.files?'send':'receive';this.files=options.files;
+    this.requestedParallelism=parallelism(options.laneCount);this.parallelism=this.requestedParallelism;
     this.record=options.record;this.manifest=this.record?.manifest;this.id=this.record?.transferId||options.id||(this.files?crypto.randomUUID():null);
     this.token=this.record?.token||(this.files?secret():null);this.state='connecting';this.epoch=0;this.waiters=[];this.tasks=new Set();
     this.localPaused=false;this.peerPaused=false;this.lastActivity=Date.now();this.lastUI=0;this.samples=[];this.bytes=0;this.total=0;
@@ -97,7 +100,7 @@ export class BlockTransfer {
           }
           this.queue=this.queue.then(()=>{this.guard(epoch);return this.receiveControl(m,epoch);}).catch(e=>this.handleError(e));
         }else {
-          const size=raw.byteLength||raw.size||0;this.queuedBytes+=size;if(this.queuedBytes>BLOCK_SIZE*MAX_BLOCK_WINDOW+MAX_SEND_BUFFER*MAX_LANES)throw Error('Peer sent too much data without acknowledgement.');
+          const size=raw.byteLength||raw.size||0;this.queuedBytes+=size;if(this.queuedBytes>BLOCK_SIZE*this.parallelism.blocks+TOTAL_SEND_BUFFER)throw Error('Peer sent too much data without acknowledgement.');
           this.queue=this.queue.then(async()=>{try{this.guard(epoch);const data=raw instanceof Blob?await raw.arrayBuffer():raw;this.guard(epoch);this.receiveBinary(data);}finally{if(epoch===this.epoch)this.queuedBytes-=size;}}).catch(e=>this.handleError(e));
         }
       }catch(e){this.handleError(e);}
@@ -116,7 +119,7 @@ export class BlockTransfer {
     return transportPlan(conn);
   }
   addLane(conn,index,epoch=this.epoch){
-    if(!conn||!Number.isInteger(index)||index<=0||index>=MAX_LANES){conn?.close?.();return false;}
+    if(!conn||!Number.isInteger(index)||index<=0||index>=this.parallelism.lanes){conn?.close?.();return false;}
     const previous=this.lanes.get(index);if(previous&&previous!==conn)previous.close();
     this.lanes.set(index,conn);this.lanePlans.set(index,transportPlan(conn));
     conn.on('data',raw=>{
@@ -124,7 +127,7 @@ export class BlockTransfer {
       this.lastActivity=Date.now();
       if(typeof raw==='string'){conn.close();return;}
       const size=raw.byteLength||raw.size||0;this.queuedBytes+=size;
-      if(this.queuedBytes>BLOCK_SIZE*MAX_BLOCK_WINDOW+MAX_SEND_BUFFER*MAX_LANES){this.handleError(Error('Peer sent too much parallel data without acknowledgement.'));conn.close();return;}
+      if(this.queuedBytes>BLOCK_SIZE*this.parallelism.blocks+TOTAL_SEND_BUFFER){this.handleError(Error('Peer sent too much parallel data without acknowledgement.'));conn.close();return;}
       const prior=conn._wftQueue||Promise.resolve();
       conn._wftQueue=prior.then(async()=>{try{this.guard(epoch);const data=raw instanceof Blob?await raw.arrayBuffer():raw;this.guard(epoch);this.receiveBinary(data,epoch);}finally{if(epoch===this.epoch)this.queuedBytes-=size;}}).catch(e=>this.handleError(e));
     });
@@ -141,10 +144,12 @@ export class BlockTransfer {
   }
   async openTurboLanes(epoch){
     if(!this.options.openLane||this.total<PARALLEL_THRESHOLD)return;
-    const desired=Math.min(MAX_LANES,Math.max(2,Number(this.options.laneCount)||3));
+    const desired=this.parallelism.lanes;
     for(let index=1;index<desired;index++){
       this.guard(epoch);
       try{this.addLane(this.options.openLane(index),index,epoch);}catch{}
+      // Yield between connection handshakes so high settings keep the UI responsive.
+      if(index%4===0)await new Promise(resolve=>setTimeout(resolve,0));
     }
     // Let PeerJS start the extra ICE/SCTP handshakes without delaying the transfer.
     await Promise.resolve();this.guard(epoch);
@@ -202,6 +207,8 @@ export class BlockTransfer {
     for(;;) {
       while(this.localPaused||this.peerPaused){this.guard(epoch);await new Promise(r=>setTimeout(r,100));}
       this.guard(epoch);const dc=conn?.dataChannel,{high,low:lowWater}=this.planFor(conn);
+      const buffered=[...this.lanes.values()].reduce((sum,lane)=>sum+(lane.dataChannel?.bufferedAmount||0),0);
+      if(buffered>=TOTAL_SEND_BUFFER){await new Promise(resolve=>setTimeout(resolve,10));continue;}
       if(!dc||dc.bufferedAmount<high)return;
       dc.bufferedAmountLowThreshold=lowWater;
       await new Promise((resolve,reject)=>{
@@ -218,8 +225,11 @@ export class BlockTransfer {
     this.manifest=manifestFor(this.files);this.total=this.manifest.reduce((n,f)=>n+f.size,0);
     if(!this.record)this.record={id:'send:'+this.id,transferId:this.id,token:this.token,direction:'send',sourceFolder:!!this.files[0]?.archiveFolder,manifest:this.manifest,files:this.manifest.map(emptyFile),senderId:this.options.senderId||'local',receiverId:this.options.receiverId||'remote',created:Date.now(),state:'waiting'};
     if(!sameManifest(this.manifest,this.record.manifest))throw Error('Select the same original files, with matching names, sizes, and modification dates, to resume.');
-    this.guard(epoch);const acceptance=this.request('hello',{token:this.token,manifest:this.manifest,senderId:this.record.senderId,receiverId:this.record.receiverId,paused:this.localPaused},'accept',epoch);this.transition('waiting');
+    this.guard(epoch);const acceptance=this.request('hello',{token:this.token,manifest:this.manifest,senderId:this.record.senderId,receiverId:this.record.receiverId,paused:this.localPaused,parallelism:this.requestedParallelism},'accept',epoch);this.transition('waiting');
     const accepted=await acceptance;
+    // Old v5 receivers do not advertise a setting: retain their original limits.
+    this.parallelism=accepted.parallelism===undefined?{lanes:3,blocks:4}:validateParallelism(accepted.parallelism);
+    if(this.parallelism.lanes>this.requestedParallelism.lanes)throw Error('Receiver increased transfer parallelism unexpectedly.');
     if(!Array.isArray(accepted.files)||accepted.files.length!==this.files.length)throw Error('Invalid saved transfer state.');
     await this.store.put(this.record);this.guard(epoch);
     this.peerPaused=!!accepted.paused;this.transition(this.localPaused||this.peerPaused?'paused':'transferring');
@@ -263,7 +273,7 @@ export class BlockTransfer {
           return prepared;
         };
         const active=new Map(),completed=new Map();let launch=state.next;
-        const window=Math.min(MAX_BLOCK_WINDOW,Math.max(1,Math.min(DEFAULT_BLOCK_WINDOW,count-state.next)));
+        const window=Math.max(1,Math.min(this.parallelism.blocks,count-state.next));
         while(state.next<count){
           while(launch<count&&launch<state.next+window){
             const b=launch++,prepared=await prepareBlock(b);this.guard(epoch);
@@ -294,6 +304,8 @@ export class BlockTransfer {
       if(this.helloSeen)throw Error('Duplicate transfer greeting.');this.helloSeen=true;
       if(typeof m.token!=='string'||!HEX.test(m.token)||typeof m.senderId!=='string'||m.senderId.length>64||typeof m.receiverId!=='string'||m.receiverId.length>64)throw Error('Invalid transfer identity.');
       if(this.options.senderId&&m.senderId!==this.options.senderId||this.options.receiverId&&m.receiverId!==this.options.receiverId)throw Error('Transfer is addressed to a different device.');
+      this.id=m.id;
+      this.parallelism=m.parallelism===undefined?{lanes:4,blocks:6}:validateParallelism(m.parallelism);
       this.id=m.id;this.token=m.token;this.manifest=manifestFor(m.manifest);this.total=this.manifest.reduce((n,f)=>n+f.size,0);this.peerPaused=!!m.paused;
       const saved=await this.store.get('receive:'+this.id);this.guard(epoch);
       if(saved) {
@@ -314,7 +326,7 @@ export class BlockTransfer {
     if(!this.record||!this.storage)throw Error('File data arrived before acceptance.');
     if(m.type==='block-start') {
       if(!Number.isInteger(m.file)||m.file<0)throw Error('Invalid file index.');const file=this.manifest[m.file],state=this.record.files[m.file],count=file?Math.ceil(file.size/BLOCK_SIZE):0,key=`${m.file}:${m.block}`;
-      if(!file||state.complete||!Number.isInteger(m.block)||m.block<state.next||m.block>=Math.min(count,state.next+MAX_BLOCK_WINDOW)||this.blocks.has(key)||m.size!==Math.min(BLOCK_SIZE,file.size-m.block*BLOCK_SIZE)||m.size<=0||!HEX.test(m.hash))throw Error('Invalid block metadata.');
+      if(!file||state.complete||!Number.isInteger(m.block)||m.block<state.next||m.block>=Math.min(count,state.next+this.parallelism.blocks)||this.blocks.has(key)||m.size!==Math.min(BLOCK_SIZE,file.size-m.block*BLOCK_SIZE)||m.size<=0||!HEX.test(m.hash))throw Error('Invalid block metadata.');
       this.blocks.set(key,{file:m.file,index:m.block,hash:m.hash,data:new Uint8Array(m.size),received:0,buckets:new Map(),endSeen:false,finalizing:null});this.send('ready',{file:m.file,block:m.block});return;
     }
     if(m.type==='block-end') {
@@ -348,8 +360,10 @@ export class BlockTransfer {
     block.finalizing=(async()=>{
       const key=`${block.file}:${block.index}`,digest=await blockHash(block.data);this.guard(epoch);
       if(digest!==block.hash){this.blocks.delete(key);this.send('block-nack',{file:block.file,block:block.index});return;}
-      await this.storage.write(block.file,block.index,block.data);this.guard(epoch);this.completedData.set(key,block.data);
       const commit=this.commitQueue.catch(()=>{}).then(async()=>{
+        this.guard(epoch);
+        // Packed OPFS blocks share a file: concurrent writable snapshots can overwrite one another.
+        await this.storage.write(block.file,block.index,block.data);this.guard(epoch);this.completedData.set(key,block.data);
         const state=this.record.files[block.file];state.hashes[block.index]=digest;
         let hasher=this.receiveHashes.get(block.file);if(!hasher){hasher=new Integrity(state.checkpoint);this.receiveHashes.set(block.file,hasher);}
         while(this.completedData.has(`${block.file}:${state.next}`)){
@@ -379,7 +393,7 @@ export class BlockTransfer {
       this.storage=await this.Storage.open(this.record);if(this.state==='cancelled'){await this.storage.cleanup();return;}this.guard(epoch);await this.store.put(this.record);this.guard(epoch);this.acceptState();
     }catch(e){this.handleError(e);}
   }
-  acceptState(){this.send('accept',{files:this.record.files.map(f=>({next:f.next,lastHash:f.hashes.at(-1)})),paused:this.localPaused});this.transition(this.localPaused||this.peerPaused?'paused':'transferring');}
+  acceptState(){this.send('accept',{files:this.record.files.map(f=>({next:f.next,lastHash:f.hashes.at(-1)})),paused:this.localPaused,...(this.parallelism.lanes>=8?{parallelism:this.parallelism}:{})});this.transition(this.localPaused||this.peerPaused?'paused':'transferring');}
   refreshPause(){if(['transferring','paused'].includes(this.state))this.transition(this.localPaused||this.peerPaused?'paused':'transferring',this.peerPaused?'Paused on the other device.':this.localPaused?'Paused. Your verified progress is saved.':'');}
   pause(){if(!['transferring','paused'].includes(this.state))return;this.localPaused=true;this.send('pause');this.refreshPause();}
   resume(){if(this.state==='reconnecting'){this.options.onInterrupted?.(this);return;}this.localPaused=false;if(this.conn.open)this.send('resume');this.refreshPause();}
@@ -412,3 +426,4 @@ export class BlockTransfer {
     if(state!=='cancelled'||!notify){const lanes=[...this.lanes.values()];setTimeout(()=>{for(const lane of lanes)lane.close();},state==='cancelled'?5000:1000);}
   }
 }
+

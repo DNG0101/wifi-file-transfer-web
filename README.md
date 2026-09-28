@@ -1,3 +1,9 @@
+## Transfer parallelism (4.14.0)
+
+The sender's **Transfer parallelism** slider ranges from **8 to 50 lanes**, defaults to **8**, and requests exactly **2 blocks per lane** (16–100 blocks). The value is captured when a transfer starts; changing it does not reconfigure an active transfer. Both peers negotiate and validate the setting. Older v5 receivers retain their original 3-lane / 4-block behavior until refreshed.
+
+Lanes include the primary connection. Transfers smaller than 16 MiB use the primary lane; unavailable secondary connections can also reduce actual lane usage. A file with fewer blocks only needs those blocks. Higher settings are not a speed guarantee: 100 × 8 MiB blocks alone can require 800 MiB, before copies, hashing and other buffers. Aggregate outgoing network buffering is limited separately. Packed receive-file writes are serialized to avoid competing writable snapshots.
+
 # Wi-Fi File Transfer — version 4.13.0
 
 [Open the app](https://dng0101.github.io/wifi-file-transfer-web/)
@@ -117,3 +123,4 @@ Cancellation cleanup waits for outstanding receive, storage-opening, and sender-
 The sender avoids a redundant copy for each network frame and overlaps incremental whole-file hashing with block hashing and transport. Frame-size negotiation, native backpressure, per-block verification, durable acknowledgements, and final SHA-256 verification remain enabled. Actual throughput depends on the network route, storage, CPU and browser; no speed multiplier or physical 1 TiB transfer has been verified.
 
 See [4.10 validation](docs/validation-4.10.md) for the tested scenarios and execution limits.
+
