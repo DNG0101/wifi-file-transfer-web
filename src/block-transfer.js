@@ -25,10 +25,11 @@ const secret=()=>Array.from(crypto.getRandomValues(new Uint8Array(32)),b=>b.toSt
 export function manifestFor(files) {
   if(!Array.isArray(files)||!files.length||files.length>200)throw Error('Choose between 1 and 200 files per transfer.');
   const manifest=files.map(f=>{
-    if(typeof f.name!=='string'||f.name.length>240||!Number.isSafeInteger(f.size)||f.size<0||f.size>MAX_FILE_SIZE)throw Error('Invalid file metadata or file larger than the supported 1 TB limit.');
+    if(typeof f.name!=='string'||f.name.length>240||!Number.isSafeInteger(f.size)||f.size<0||f.size>MAX_FILE_SIZE)throw Error('Invalid file metadata or size beyond exact browser byte addressing.');
     const path=f.webkitRelativePath||f.path||f.name;
     return {name:safeName(f.name),path:cleanPath(path),size:f.size,type:typeof f.type==='string'?f.type.slice(0,120):'',lastModified:Number.isSafeInteger(f.lastModified)?f.lastModified:0};
   });
+  if(!Number.isSafeInteger(manifest.reduce((sum,file)=>sum+file.size,0)))throw Error('Total file size exceeds exact browser byte addressing.');
   if(new TextEncoder().encode(JSON.stringify(manifest)).length>32*1024)throw Error('Too many filenames in one batch. Select fewer files.');
   return manifest;
 }
@@ -419,7 +420,7 @@ export class BlockTransfer {
     if(this.state!=='offered')return;const epoch=this.epoch;this.transition('preparing','Preparing persistent storage…');
     try {
       if(this.options.requireDirectory&&(destination?.storage!=='directory'||!destination.directory))throw Error('Choose a device folder. Browser-stored file contents are disabled.');
-      this.record={id:'receive:'+this.id,transferId:this.id,token:this.token,direction:'receive',manifest:this.manifest,files:this.manifest.map(emptyFile),senderId:this.pendingHello.senderId,receiverId:this.pendingHello.receiverId,created:Date.now(),state:'transferring',storage:destination.storage,directory:destination.directory,layout:'packed-v1'};
+      this.record={id:'receive:'+this.id,transferId:this.id,token:this.token,direction:'receive',manifest:this.manifest,files:this.manifest.map(emptyFile),senderId:this.pendingHello.senderId,receiverId:this.pendingHello.receiverId,created:Date.now(),state:'transferring',storage:destination.storage,directory:destination.directory,layout:'blocks-v2'};
       this.storage=await this.Storage.open(this.record);if(this.state==='cancelled'){await this.storage.cleanup();return;}this.guard(epoch);await this.store.put(this.record);this.guard(epoch);this.acceptState();
     }catch(e){this.handleError(e);}
   }

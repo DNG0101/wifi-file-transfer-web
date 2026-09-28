@@ -1,3 +1,13 @@
+## Large files and local transfers (4.16.0)
+
+Removed the previous 1 TB product cap. File sizes and batch totals must still fit JavaScript safe integer byte addressing; the 32-bit block index covers that range with 8 MiB blocks. This is not a promise of unlimited storage or browser capacity.
+
+New receives write independent 8 MiB staging blocks, then stream them once into the finished file and release the blocks. This avoids repeatedly opening a growing packed file with keepExistingData, which can copy previously received data on every block. Existing packed transfers remain resumable. Disk reads during assembly verify every block hash. Working payload buffers depend on the selected block window, not the total file size; recovery metadata grows with the number of blocks.
+
+On supported browsers, **Save to folder (large files)** in the receiver's offer uses a user-selected disk folder instead of browser-origin storage quota. Both paths need temporary storage plus room for the finished file (approximately twice the incoming size at peak). The bounded in-memory IndexedDB fallback remains limited to 256 MiB; removing that guard would risk exhausting memory rather than enable reliable large transfers.
+
+Local Wi-Fi/hotspot speed still depends on the selected WebRTC route, radio signal, router isolation, CPU and disk. This release fixes a storage bottleneck; it does not guarantee a particular transfer speed on untested devices.
+
 ## Transfer parallelism (4.15.0)
 
 The sender's **Transfer parallelism** slider ranges from **8 to 50 lanes**, defaults to **8**, and requests exactly **2 blocks per lane** (16–100 blocks). The sender can change the slider during a transfer. New blocks stop launching while current blocks finish and receive durable acknowledgements. Both peers then validate and acknowledge the new setting before new lanes or blocks are used. Decreasing closes excess lanes only after that drain. Rapid changes coalesce to the latest requested value. Paused in-flight blocks must resume before the change can take effect. Transfer cards show the applied setting and any pending change. Both devices must run 4.15.0 or later for live updates; older clients continue at the originally agreed setting. Older v5 receivers retain their original 3-lane / 4-block behavior until refreshed.

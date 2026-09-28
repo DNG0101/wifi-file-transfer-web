@@ -2,7 +2,8 @@ import {createDatabaseConnection} from './database-connection.js';
 import {Integrity,blockHash} from './integrity.js';
 import {safeName} from './transfer.js';
 export const BLOCK_SIZE=8*1024*1024;
-export const MAX_FILE_SIZE=1024**4;
+// Byte positions must remain exactly representable by JavaScript and browser File APIs.
+export const MAX_FILE_SIZE=Number.MAX_SAFE_INTEGER;
 const DB_NAME='wft-durable-v3';
 const CLEANUP_MS=48*60*60*1000;
 const durableConnection=createDatabaseConnection(
@@ -57,7 +58,7 @@ export async function storageAvailability(bytes=0) {
   const estimate=await navigator.storage?.estimate?.().catch(()=>({}))||{};
   const available=typeof estimate.quota==='number'?Math.max(0,estimate.quota-(estimate.usage||0)):null;
   const reserve=Math.max(64*1024*1024,Math.ceil(bytes*0.1));
-  return {opfs:!!navigator.storage?.getDirectory,indexedDB:typeof indexedDB!=='undefined',directory:typeof window.showDirectoryPicker==='function',available,enough:available===null||available>bytes+reserve};
+  return {opfs:!!navigator.storage?.getDirectory,indexedDB:typeof indexedDB!=='undefined',directory:typeof window.showDirectoryPicker==='function',available,enough:available===null||available>=bytes*2+reserve};
 }
 export function friendlyStorageError(e) {
   if(e?.name==='QuotaExceededError')return 'Storage is full. Free space, then retry.';
@@ -118,9 +119,11 @@ export class BlockStorage {
         output={name:meta.name,handle:await this.staging.getFileHandle(`f${file}.part`)};const blob=await output.handle.getFile();if(blob.size!==meta.size)throw Error('The received file size does not match. Retry the transfer.');onProgress(meta.size);
       }else if(this.staging){output={name:meta.name,handle:await this.staging.getFileHandle(`verified-${file}`,{create:true})};writer=await output.handle.createWritable();}
       else if(meta.size>256*1024*1024)throw Error('This browser needs a download folder or OPFS for large files.');
-      if(writer||!output){for(let b=0;b<state.next;b++){if(isCancelled())throw Error('Verification cancelled.');const bytes=await this.read(file,b);if(writer)await writer.write(bytes);else fallback.push(bytes);onProgress(Math.min(meta.size,(b+1)*BLOCK_SIZE));}}
+      if(writer||!output){for(let b=0;b<state.next;b++){if(isCancelled())throw Error('Verification cancelled.');const bytes=await this.read(file,b);if(await blockHash(bytes)!==state.hashes[b])throw Error('A temporary block changed. Retry the transfer.');if(writer)await writer.write(bytes);else fallback.push(bytes);onProgress(Math.min(meta.size,(b+1)*BLOCK_SIZE));}}
       if(isCancelled())throw Error('Verification cancelled.');if(writer)await writer.close();if(isCancelled())throw Error('Verification cancelled before completion was acknowledged.');
       state.digest=digest;state.complete=true;state.outputName=output?.name;state.outputHandle=output?.handle;await records.put(this.record);
+      // Commit metadata first: interruption leaves either resumable blocks or a complete output.
+      if(this.staging&&this.record.layout!=='packed-v1')for(let b=0;b<state.next;b++)await this.removeBlock(file,b);
       return this.record.storage==='directory'?{savedName:output.name}:{blob:output?await output.handle.getFile():new Blob(fallback,{type:'application/octet-stream'})};
     }catch(e){await writer?.abort().catch(()=>{});throw e;}
   }
@@ -157,3 +160,4 @@ export class BlockStorage {
     else for(let f=0;f<this.record.files.length;f++)for(let b=0;b<this.record.files[f].next;b++)await this.removeBlock(f,b);
   }
 }
+

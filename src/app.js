@@ -258,7 +258,7 @@ async function refreshAcceptance() {
     if(offeredTransfer!==transfer||generation!==acceptanceGeneration)return;
     const supported=availability.opfs||availability.indexedDB&&transfer.total<=256*1024*1024;
     $('accept').disabled=!supported||!availability.enough;
-    $('request-note').textContent=!supported?'This browser needs persistent file storage for downloads larger than 256 MB. Try a current browser.':!availability.enough?'Not enough browser storage to prepare these files. Free space or send a smaller batch.':'Accept to receive verified files in your browser Downloads. Allow multiple downloads if asked. A Download button remains available if your browser blocks automatic downloads.';
+    $('request-note').textContent=!supported?'This browser cannot assemble this file safely in memory. Choose Save to folder if available, or use a browser with filesystem storage.':!availability.enough?'Not enough browser storage for staging and the finished file. Choose Save to folder if available, or free storage.':'Accept to receive verified files in your browser Downloads. Allow multiple downloads if asked. A Download button remains available if your browser blocks automatic downloads.';
   }catch(error){if(offeredTransfer===transfer)$('request-note').textContent='Could not check download storage: '+error.message;}
 }
 function receivedFile(file) {
@@ -271,7 +271,7 @@ function receivedFile(file) {
     remove.onclick=()=>{URL.revokeObjectURL(url);const i=downloads.indexOf(item);if(i>=0)downloads.splice(i,1);line.remove();$('download-memory').textContent='After saving downloads, use Downloads saved — clear temporary copies.';};
     actions.append(a,remove);line.append(name,actions);
     $('downloads').append(line);a.click();
-  } else {line.append(el('span','✓ Saved '+file.savedName+' to your previously chosen folder'));$('downloads').append(line);}
+  } else {line.append(el('span','✓ Saved '+file.savedName+' to your selected folder'));$('downloads').append(line);}
   $('received-section').hidden=false;
   $('download-memory').textContent='Check your browser Downloads. If a file did not appear, tap Download. Completed temporary copies are cleared when you refresh. You can also clear them now after checking your downloads.';
 }
@@ -490,7 +490,20 @@ $('accept').onclick=async()=>{
   if(transfer.state==='failed')return;
   if(offeredTransfer===transfer)closeRequest();controls();showNextOffer();notice('Receiving and preparing your browser downloads…');
 };
-$('choose-folder').hidden=$('request-folder').hidden=true;
+$('choose-folder').hidden=true;
+$('request-folder').hidden=typeof window.showDirectoryPicker!=='function';
+$('request-folder').textContent='Save to folder (large files)';
+$('request-folder').onclick=async()=>{
+ const transfer=offeredTransfer;if(transfer?.state!=='offered')return;
+ try{
+  // Call the picker directly from the click to preserve browser user activation.
+  const directory=await window.showDirectoryPicker({mode:'readwrite'});
+  if(offeredTransfer!==transfer||transfer.state!=='offered')return;
+  await transfer.accept({storage:'directory',directory});
+  if(transfer.state==='failed')return;
+  if(offeredTransfer===transfer)closeRequest();controls();showNextOffer();notice('Receiving into your selected folder. Keep enough disk space for temporary blocks and the finished file.');
+ }catch(error){if(error.name!=='AbortError'&&offeredTransfer===transfer)$('request-note').textContent='Could not use that folder: '+error.message;}
+};
 $('direct-save-support').textContent='Verified files are downloaded using your browser. Your browser controls the download folder and may ask you to allow multiple downloads.';
 $('clear-history').onclick=()=>{if(!busy()){history=[];save();drawHistory();}};
 $('keep-awake').onchange=()=>void maintainWakeLock();
