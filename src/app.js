@@ -18,6 +18,13 @@ const selectedParallelism=bindParallelism($('transfer-lanes'),$('transfer-parall
 const number=(n,digits=0)=>new Intl.NumberFormat(undefined,{maximumFractionDigits:digits}).format(n);
 const fmt = n => n<1024?`${number(n)} B`:n<1048576?`${number(n/1024,1)} KB`:n<1073741824?`${number(n/1048576,1)} MB`:`${number(n/1073741824,2)} GB`;
 const transfers=new Map(),peerQueues=new Map(),cancelBarriers=new Map(),cancelledTransfers=new Map();
+$('transfer-lanes').addEventListener('input',()=>{
+ const setting=selectedParallelism();let changed=0,legacy=0;
+ for(const {transfer} of transfers.values())if(transfer.direction==='send'&&!transfer.terminal()){
+  transfer.setLaneCount(setting.lanes);changed++;if(!transfer.liveParallelism)legacy++;
+ }
+ $('parallelism-status').textContent=changed?`Requested ${setting.lanes} lanes / ${setting.blocks} blocks for ${changed} outgoing transfer(s). Changes apply after in-flight blocks finish; paused transfers may need Resume.${legacy?' Older receivers need refreshing for live changes.':''}`:`Next transfer: ${setting.lanes} lanes / ${setting.blocks} blocks.`;
+});
 let offeredTransfer=null,preparingSelection=false;
 let room, mode=null, files=[], members=[], active, directory,trust,resumeRecord;
 let selectedMember,preparedConnection,preparingDevice=false,prepareGeneration=0,latestDiagnosis;
@@ -117,7 +124,7 @@ function updateCard(row) {
   c.detail.textContent=row.files.map(f=>f.name).join(', ');
   c.progress.value=row.total?Math.min(100,row.bytes/row.total*100):row.state==='complete'?100:0;
   c.progress.setAttribute('aria-label',`Transfer to or from ${row.peer}`);
-  const percent=row.total?Math.min(100,row.bytes/row.total*100):row.state==='complete'?100:0;c.label.textContent=`${stateLabel[row.state]||row.state} · ${number(percent,percent<10?1:0)}% · ${fmt(row.bytes||0)} / ${fmt(row.total||0)}${row.speed?' · '+fmt(row.speed)+'/s':''}${row.eta?' · about '+Math.ceil(row.eta/60)+' min left':''}${row.state==='verifying'?' · '+fmt(row.verifiedBytes||0)+' checked':''}${row.detail?' · '+row.detail:''}`;
+  const percent=row.total?Math.min(100,row.bytes/row.total*100):row.state==='complete'?100:0;c.label.textContent=`${stateLabel[row.state]||row.state} · ${number(percent,percent<10?1:0)}% · ${fmt(row.bytes||0)} / ${fmt(row.total||0)}${row.speed?' · '+fmt(row.speed)+'/s':''}${row.eta?' · about '+Math.ceil(row.eta/60)+' min left':''}${row.state==='verifying'?' · '+fmt(row.verifiedBytes||0)+' checked':''}${row.detail?' · '+row.detail:''}${row.parallelism&&!terminal?' · '+row.parallelism.lanes+' lanes / '+row.parallelism.blocks+' blocks':''}${row.direction==='send'&&!terminal&&row.requestedParallelism&&row.parallelism&&row.requestedParallelism.lanes!==row.parallelism.lanes?' · '+(row.liveParallelism?'Change pending':'Change on reconnect')+': '+row.requestedParallelism.lanes+' / '+row.requestedParallelism.blocks:''}`;
 }
 function setMode(next) {
   mode=next;room?.setMode(mode);trust?.setMode(mode);

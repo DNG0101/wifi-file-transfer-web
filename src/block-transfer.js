@@ -49,7 +49,7 @@ export class BlockTransfer {
   constructor(conn,options={}) {
     this.options=options;this.store=options.store||records;this.Storage=options.Storage||BlockStorage;
     this.direction=options.files?'send':'receive';this.files=options.files;
-    this.requestedParallelism=parallelism(options.laneCount);this.parallelism=this.requestedParallelism;
+    this.requestedParallelism=parallelism(options.laneCount);this.parallelism=this.requestedParallelism;this.liveParallelism=false;
     this.record=options.record;this.manifest=this.record?.manifest;this.id=this.record?.transferId||options.id||(this.files?crypto.randomUUID():null);
     this.token=this.record?.token||(this.files?secret():null);this.state='connecting';this.epoch=0;this.waiters=[];this.tasks=new Set();
     this.localPaused=false;this.peerPaused=false;this.lastActivity=Date.now();this.lastUI=0;this.samples=[];this.bytes=0;this.total=0;
@@ -63,6 +63,25 @@ export class BlockTransfer {
     },10000);
   }
   terminal(){return CLOSED.has(this.state);}
+  setLaneCount(value){
+    if(this.direction!=='send'||this.terminal())return false;
+    this.requestedParallelism=parallelism(value);this.emit(true);return true;
+  }
+  parallelismPending(){return this.liveParallelism&&this.requestedParallelism.lanes!==this.parallelism.lanes;}
+  pruneLanes(){
+    for(const [index,lane] of this.lanes)if(index>=this.parallelism.lanes){
+      this.lanes.delete(index);this.lanePlans.delete(index);lane.close();
+    }
+  }
+  async applyParallelism(epoch){
+    if(!this.parallelismPending())return;
+    // Called only after all outstanding blocks have durable ACKs.
+    const requested={...this.requestedParallelism};
+    const response=await this.request('parallelism-update',{parallelism:requested},'parallelism-ready',epoch);
+    this.guard(epoch);const accepted=validateParallelism(response.parallelism);
+    if(accepted.lanes!==requested.lanes)throw Error('Receiver did not confirm the requested parallelism.');
+    this.parallelism=accepted;this.pruneLanes();await this.openTurboLanes(epoch);this.emit(true);
+  }
   transition(next,detail='') {
     if(this.terminal()&&next!==this.state)return;
     if(next!==this.state&&!CLOSED.has(next)&&!TRANSITIONS[this.state]?.includes(next))throw Error(`Invalid transfer state: ${this.state} to ${next}`);
@@ -73,11 +92,11 @@ export class BlockTransfer {
     const bytes=this.record?this.record.files.reduce((sum,f,i)=>sum+Math.min(this.manifest[i].size,f.next*BLOCK_SIZE),0):0;
     this.bytes=bytes;this.samples.push([now,bytes]);this.samples=this.samples.filter(s=>now-s[0]<5000);
     const first=this.samples[0],speed=this.samples.length>1&&now>first[0]&&!['paused','reconnecting','verifying'].includes(this.state)?Math.max(0,(bytes-first[1])*1000/(now-first[0])):0;
-    this.options.onUpdate?.({id:this.id,state:this.state,detail:this.detail||'',direction:this.direction,files:this.manifest||[],bytes,total:this.total,speed,eta:speed?(this.total-bytes)/speed:null,remotePaused:this.peerPaused,localPaused:this.localPaused,fileIndex:this.fileIndex||0,verifiedBytes:this.verifiedBytes||0});
+    this.options.onUpdate?.({id:this.id,state:this.state,detail:this.detail||'',direction:this.direction,files:this.manifest||[],bytes,total:this.total,speed,eta:speed?(this.total-bytes)/speed:null,remotePaused:this.peerPaused,localPaused:this.localPaused,fileIndex:this.fileIndex||0,verifiedBytes:this.verifiedBytes||0,parallelism:{...this.parallelism},requestedParallelism:{...this.requestedParallelism},liveParallelism:this.liveParallelism});
   }
   attach(conn) {
     const old=this.conn,previousQueue=this.queue,oldLanes=[...(this.lanes?.values()||[])];this.epoch++;const epoch=this.epoch;this.conn=conn;this.queue=previousQueue?.catch(()=>{})||Promise.resolve();this.queuedBytes=0;
-    for(const hash of this.receiveHashes?.values()||[])hash.close();this.receiveHashes=new Map();this.completedData=new Map();this.blocks=new Map();this.commitQueue=this.commitQueue?.catch(()=>{})||Promise.resolve();this.helloSeen=false;this.transport=transportPlan(conn);
+    for(const hash of this.receiveHashes?.values()||[])hash.close();this.receiveHashes=new Map();this.completedData=new Map();this.blocks=new Map();this.commitQueue=this.commitQueue?.catch(()=>{})||Promise.resolve();this.helloSeen=false;this.liveParallelism=false;this.transport=transportPlan(conn);
     this.lanes=new Map([[0,conn]]);this.lanePlans=new Map([[0,this.transport]]);
     for(const lane of oldLanes)if(lane!==old&&lane!==conn)lane.close();
     if(old&&old!==conn)old.close();this.rejectWaiters(new Interrupted('Reconnecting'));
@@ -147,6 +166,7 @@ export class BlockTransfer {
     const desired=this.parallelism.lanes;
     for(let index=1;index<desired;index++){
       this.guard(epoch);
+      if(this.lanes.has(index))continue;
       try{this.addLane(this.options.openLane(index),index,epoch);}catch{}
       // Yield between connection handshakes so high settings keep the UI responsive.
       if(index%4===0)await new Promise(resolve=>setTimeout(resolve,0));
@@ -225,11 +245,13 @@ export class BlockTransfer {
     this.manifest=manifestFor(this.files);this.total=this.manifest.reduce((n,f)=>n+f.size,0);
     if(!this.record)this.record={id:'send:'+this.id,transferId:this.id,token:this.token,direction:'send',sourceFolder:!!this.files[0]?.archiveFolder,manifest:this.manifest,files:this.manifest.map(emptyFile),senderId:this.options.senderId||'local',receiverId:this.options.receiverId||'remote',created:Date.now(),state:'waiting'};
     if(!sameManifest(this.manifest,this.record.manifest))throw Error('Select the same original files, with matching names, sizes, and modification dates, to resume.');
-    this.guard(epoch);const acceptance=this.request('hello',{token:this.token,manifest:this.manifest,senderId:this.record.senderId,receiverId:this.record.receiverId,paused:this.localPaused,parallelism:this.requestedParallelism},'accept',epoch);this.transition('waiting');
+    const offeredParallelism={...this.requestedParallelism};
+    this.guard(epoch);const acceptance=this.request('hello',{token:this.token,manifest:this.manifest,senderId:this.record.senderId,receiverId:this.record.receiverId,paused:this.localPaused,parallelism:offeredParallelism,liveParallelism:true},'accept',epoch);this.transition('waiting');
     const accepted=await acceptance;
     // Old v5 receivers do not advertise a setting: retain their original limits.
     this.parallelism=accepted.parallelism===undefined?{lanes:3,blocks:4}:validateParallelism(accepted.parallelism);
-    if(this.parallelism.lanes>this.requestedParallelism.lanes)throw Error('Receiver increased transfer parallelism unexpectedly.');
+    this.liveParallelism=accepted.liveParallelism===true&&accepted.parallelism!==undefined;
+    if(this.parallelism.lanes>offeredParallelism.lanes)throw Error('Receiver increased transfer parallelism unexpectedly.');
     if(!Array.isArray(accepted.files)||accepted.files.length!==this.files.length)throw Error('Invalid saved transfer state.');
     await this.store.put(this.record);this.guard(epoch);
     this.peerPaused=!!accepted.paused;this.transition(this.localPaused||this.peerPaused?'paused':'transferring');
@@ -273,9 +295,11 @@ export class BlockTransfer {
           return prepared;
         };
         const active=new Map(),completed=new Map();let launch=state.next;
-        const window=Math.max(1,Math.min(this.parallelism.blocks,count-state.next));
         while(state.next<count){
-          while(launch<count&&launch<state.next+window){
+          if(this.parallelismPending()&&!active.size&&!completed.size){await this.applyParallelism(epoch);continue;}
+          const window=Math.max(1,Math.min(this.parallelism.blocks,count-state.next));
+          // Stop launching blocks after a slider change; drain first, then negotiate.
+          while(!this.parallelismPending()&&launch<count&&launch<state.next+window){
             const b=launch++,prepared=await prepareBlock(b);this.guard(epoch);
             const task=sendPrepared(prepared).then(result=>{completed.set(b,result);return b;});active.set(b,task);task.then(()=>active.delete(b),()=>active.delete(b));
           }
@@ -306,6 +330,7 @@ export class BlockTransfer {
       if(this.options.senderId&&m.senderId!==this.options.senderId||this.options.receiverId&&m.receiverId!==this.options.receiverId)throw Error('Transfer is addressed to a different device.');
       this.id=m.id;
       this.parallelism=m.parallelism===undefined?{lanes:4,blocks:6}:validateParallelism(m.parallelism);
+      this.liveParallelism=m.liveParallelism===true&&m.parallelism!==undefined;
       this.id=m.id;this.token=m.token;this.manifest=manifestFor(m.manifest);this.total=this.manifest.reduce((n,f)=>n+f.size,0);this.peerPaused=!!m.paused;
       const saved=await this.store.get('receive:'+this.id);this.guard(epoch);
       if(saved) {
@@ -324,6 +349,11 @@ export class BlockTransfer {
       }return;
     }
     if(!this.record||!this.storage)throw Error('File data arrived before acceptance.');
+    if(m.type==='parallelism-update') {
+      if(!this.liveParallelism||this.blocks.size||this.completedData.size)throw Error('Parallelism can change only after active blocks are saved.');
+      this.parallelism=validateParallelism(m.parallelism);this.pruneLanes();
+      this.send('parallelism-ready',{parallelism:this.parallelism});this.emit(true);return;
+    }
     if(m.type==='block-start') {
       if(!Number.isInteger(m.file)||m.file<0)throw Error('Invalid file index.');const file=this.manifest[m.file],state=this.record.files[m.file],count=file?Math.ceil(file.size/BLOCK_SIZE):0,key=`${m.file}:${m.block}`;
       if(!file||state.complete||!Number.isInteger(m.block)||m.block<state.next||m.block>=Math.min(count,state.next+this.parallelism.blocks)||this.blocks.has(key)||m.size!==Math.min(BLOCK_SIZE,file.size-m.block*BLOCK_SIZE)||m.size<=0||!HEX.test(m.hash))throw Error('Invalid block metadata.');
@@ -393,7 +423,7 @@ export class BlockTransfer {
       this.storage=await this.Storage.open(this.record);if(this.state==='cancelled'){await this.storage.cleanup();return;}this.guard(epoch);await this.store.put(this.record);this.guard(epoch);this.acceptState();
     }catch(e){this.handleError(e);}
   }
-  acceptState(){this.send('accept',{files:this.record.files.map(f=>({next:f.next,lastHash:f.hashes.at(-1)})),paused:this.localPaused,...(this.parallelism.lanes>=8?{parallelism:this.parallelism}:{})});this.transition(this.localPaused||this.peerPaused?'paused':'transferring');}
+  acceptState(){this.send('accept',{files:this.record.files.map(f=>({next:f.next,lastHash:f.hashes.at(-1)})),paused:this.localPaused,...(this.parallelism.lanes>=8?{parallelism:this.parallelism,liveParallelism:this.liveParallelism}:{})});this.transition(this.localPaused||this.peerPaused?'paused':'transferring');}
   refreshPause(){if(['transferring','paused'].includes(this.state))this.transition(this.localPaused||this.peerPaused?'paused':'transferring',this.peerPaused?'Paused on the other device.':this.localPaused?'Paused. Your verified progress is saved.':'');}
   pause(){if(!['transferring','paused'].includes(this.state))return;this.localPaused=true;this.send('pause');this.refreshPause();}
   resume(){if(this.state==='reconnecting'){this.options.onInterrupted?.(this);return;}this.localPaused=false;if(this.conn.open)this.send('resume');this.refreshPause();}

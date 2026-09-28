@@ -1,6 +1,6 @@
-## Transfer parallelism (4.14.0)
+## Transfer parallelism (4.15.0)
 
-The sender's **Transfer parallelism** slider ranges from **8 to 50 lanes**, defaults to **8**, and requests exactly **2 blocks per lane** (16–100 blocks). The value is captured when a transfer starts; changing it does not reconfigure an active transfer. Both peers negotiate and validate the setting. Older v5 receivers retain their original 3-lane / 4-block behavior until refreshed.
+The sender's **Transfer parallelism** slider ranges from **8 to 50 lanes**, defaults to **8**, and requests exactly **2 blocks per lane** (16–100 blocks). The sender can change the slider during a transfer. New blocks stop launching while current blocks finish and receive durable acknowledgements. Both peers then validate and acknowledge the new setting before new lanes or blocks are used. Decreasing closes excess lanes only after that drain. Rapid changes coalesce to the latest requested value. Paused in-flight blocks must resume before the change can take effect. Transfer cards show the applied setting and any pending change. Both devices must run 4.15.0 or later for live updates; older clients continue at the originally agreed setting. Older v5 receivers retain their original 3-lane / 4-block behavior until refreshed.
 
 Lanes include the primary connection. Transfers smaller than 16 MiB use the primary lane; unavailable secondary connections can also reduce actual lane usage. A file with fewer blocks only needs those blocks. Higher settings are not a speed guarantee: 100 × 8 MiB blocks alone can require 800 MiB, before copies, hashing and other buffers. Aggregate outgoing network buffering is limited separately. Packed receive-file writes are serialized to avoid competing writable snapshots.
 

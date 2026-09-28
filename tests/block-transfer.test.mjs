@@ -143,3 +143,59 @@ test('negotiated 100-block receiver window accepts its last slot and rejects ove
   const [extra]=pair();assert.equal(receiver.addLane(extra,50),false);assert.equal(extra.open,false);
  }finally{clearInterval(receiver.heartbeat);receiver.state='complete';a.close();}
 });
+
+test('live slider increases to 50/100 then decreases to 8/16 after draining blocks',async()=>{
+ let sender,receiver,phase=0;const updates=[];
+ const observe=raw=>{
+  if(typeof raw==='string'){
+   const m=JSON.parse(raw);
+   if(m.type==='parallelism-update'){assert.equal(receiver.blocks.size,0);assert.equal(receiver.completedData.size,0);updates.push(m.parallelism.lanes);}
+  }else if(raw instanceof ArrayBuffer&&sender){
+   if(phase===0){phase=1;sender.setLaneCount(25);sender.setLaneCount(50);}
+   else if(phase===1&&sender.parallelism.lanes===50){phase=2;sender.setLaneCount(8);}
+  }
+  return raw;
+ };
+ const [a,b]=pair(observe),store=new Store();receiver=new BlockTransfer(b,{store,Storage:storageClass(),onOffer:(_,t)=>t.accept({storage:'test'})});
+ sender=new BlockTransfer(a,{store,files:[makeFile(BLOCK_SIZE*6+100)],openLane:index=>{const [out,inc]=pair(observe);receiver.addLane(inc,index);return out;}});
+ await until(()=>sender.terminal());assert.equal(sender.state,'complete',sender.detail);assert.equal(receiver.state,'complete');assert.equal(phase,2);assert.deepEqual(updates,[50,8]);assert.deepEqual(sender.parallelism,{lanes:8,blocks:16});assert.deepEqual(receiver.parallelism,sender.parallelism);assert.equal(sender.lanes.size,8);assert.equal(receiver.lanes.size,8);
+});
+test('live setting stays pending while paused and applies after resume',async()=>{
+ let sender,paused=false;const updates=[];
+ const observe=raw=>{if(raw instanceof ArrayBuffer&&!paused){paused=true;sender.pause();sender.setLaneCount(50);}if(typeof raw==='string'&&JSON.parse(raw).type==='parallelism-update')updates.push(JSON.parse(raw));return raw;};
+ const [a,b]=pair(observe),store=new Store(),receiver=new BlockTransfer(b,{store,Storage:storageClass(),onOffer:(_,t)=>t.accept({storage:'test'})});
+ sender=new BlockTransfer(a,{store,files:[makeFile(BLOCK_SIZE*3+1)]});
+ await until(()=>paused);await sleep(100);assert.equal(updates.length,0);assert.equal(sender.parallelism.lanes,8);sender.resume();await until(()=>sender.terminal());assert.equal(sender.state,'complete',sender.detail);assert.equal(receiver.state,'complete');assert.equal(updates.length,1);assert.equal(sender.parallelism.lanes,50);
+});
+test('older receiver continues without receiving unsupported live control messages',async()=>{
+ let sender,changed=false,liveMessages=0;
+ const [a,b]=pair(raw=>{
+  if(typeof raw==='string'){const m=JSON.parse(raw);if(m.type==='accept'){delete m.liveParallelism;return JSON.stringify(m);}if(m.type==='parallelism-update')liveMessages++;}
+  else if(!changed){changed=true;sender.setLaneCount(50);}return raw;
+ });
+ const store=new Store(),receiver=new BlockTransfer(b,{store,Storage:storageClass(),onOffer:(_,t)=>t.accept({storage:'test'})});
+ sender=new BlockTransfer(a,{store,files:[makeFile(BLOCK_SIZE+1)]});await until(()=>sender.terminal());assert.equal(sender.state,'complete',sender.detail);assert.equal(receiver.state,'complete');assert.equal(liveMessages,0);assert.equal(sender.parallelism.lanes,8);assert.equal(sender.requestedParallelism.lanes,50);
+});
+test('cancelling with a pending slider increase does not open more lanes',async()=>{
+ let sender,changed=false,updates=0;
+ const [a,b]=pair(raw=>{if(raw instanceof ArrayBuffer&&!changed){changed=true;sender.setLaneCount(50);sender.cancel();}if(typeof raw==='string'&&JSON.parse(raw).type==='parallelism-update')updates++;return raw;});
+ const store=new Store(),receiver=new BlockTransfer(b,{store,Storage:storageClass(),onOffer:(_,t)=>t.accept({storage:'test'})});sender=new BlockTransfer(a,{store,files:[makeFile(BLOCK_SIZE+1)]});
+ await until(()=>receiver.terminal());assert.equal(sender.state,'cancelled');assert.equal(receiver.state,'cancelled');assert.equal(updates,0);await receiver.cleanupPromise;
+});
+
+test('interruption while applying a live setting resumes using the latest request',async()=>{
+ let sender,changed=false,broken=false;
+ const [a,b]=pair((raw,conn)=>{
+  if(raw instanceof ArrayBuffer&&!changed){changed=true;sender.setLaneCount(25);}
+  if(typeof raw==='string'&&JSON.parse(raw).type==='parallelism-ready'&&!broken){broken=true;conn.close();return;}
+  return raw;
+ });
+ const store=new Store(),receiver=new BlockTransfer(b,{store,Storage:storageClass(),onOffer:(_,t)=>t.accept({storage:'test'})});sender=new BlockTransfer(a,{store,files:[makeFile(BLOCK_SIZE*3+1)]});
+ await until(()=>sender.state==='reconnecting'&&receiver.state==='reconnecting');assert.equal(broken,true);
+ sender.setLaneCount(50);const [c,d]=pair();receiver.attach(d);sender.attach(c);await until(()=>sender.terminal());assert.equal(sender.state,'complete',sender.detail);assert.equal(receiver.state,'complete');assert.deepEqual(sender.parallelism,{lanes:50,blocks:100});assert.deepEqual(receiver.parallelism,sender.parallelism);
+});
+test('receiver rejects a live change while blocks are outstanding',async()=>{
+ const [a,b]=pair(),receiver=new BlockTransfer(b,{store:new Store(),Storage:storageClass()});receiver.id=crypto.randomUUID();receiver.liveParallelism=true;receiver.record={};receiver.storage={};receiver.blocks.set('0:0',{});
+ try{await assert.rejects(()=>receiver.receiveControl({type:'parallelism-update',parallelism:{lanes:50,blocks:100}},receiver.epoch),/active blocks/);assert.equal(receiver.parallelism.lanes,8);}
+ finally{clearInterval(receiver.heartbeat);receiver.state='complete';a.close();}
+});
